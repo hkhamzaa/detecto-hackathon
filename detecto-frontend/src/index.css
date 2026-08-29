@@ -1,0 +1,238 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import './fonts.css';
+
+@custom-variant dark (&:is(.dark *));
+
+/* ------------------------------------------------------------------------- */
+/* Detecto design tokens                                                      */
+/* Ink = control-room chrome. Paper = the lit evidence surface.               */
+/* Signal marks unconfirmed AI flags on alert surfaces, and is the error and  */
+/* danger color everywhere else. Confirm marks human sign-off.                */
+/* ------------------------------------------------------------------------- */
+@theme {
+  /* Type families */
+  --font-display: 'General Sans', 'Neue Montreal', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Type scale — display is used with restraint, body carries the dashboard,
+     mono carries real surveillance metadata (IDs, confidence, timestamps). */
+  --text-display-xl: 3.5rem;
+  --text-display-xl--line-height: 1.02;
+  --text-display-xl--letter-spacing: -0.035em;
+
+  --text-display-lg: 2.5rem;
+  --text-display-lg--line-height: 1.06;
+  --text-display-lg--letter-spacing: -0.03em;
+
+  --text-display-md: 1.75rem;
+  --text-display-md--line-height: 1.14;
+  --text-display-md--letter-spacing: -0.022em;
+
+  --text-display-sm: 1.25rem;
+  --text-display-sm--line-height: 1.25;
+  --text-display-sm--letter-spacing: -0.015em;
+
+  --text-title: 1.0625rem;
+  --text-title--line-height: 1.45;
+  --text-title--letter-spacing: -0.008em;
+
+  --text-body: 0.9375rem;
+  --text-body--line-height: 1.6;
+  --text-body--letter-spacing: 0em;
+
+  --text-meta: 0.8125rem;
+  --text-meta--line-height: 1.5;
+  --text-meta--letter-spacing: 0em;
+
+  --text-data: 0.8125rem;
+  --text-data--line-height: 1.45;
+  --text-data--letter-spacing: 0.01em;
+
+  --text-micro: 0.6875rem;
+  --text-micro--line-height: 1.4;
+  --text-micro--letter-spacing: 0.14em;
+
+  /* Anchors */
+  --color-ink: #14181f;
+  --color-ink-raised: #1b1f27;
+  --color-ink-hairline: #262b33;
+  --color-paper: #f7f6f3;
+  --color-paper-raised: #ffffff;
+  --color-paper-sunken: #f0efed;
+
+  /* Neutral ramp — linearly interpolated between Ink and Paper */
+  --color-neutral-50: #f0efed;
+  --color-neutral-100: #e5e4e2;
+  --color-neutral-200: #d0d0cf;
+  --color-neutral-300: #b7b8b8;
+  --color-neutral-400: #9c9d9e;
+  --color-neutral-500: #7f8083;
+  --color-neutral-600: #616467;
+  --color-neutral-700: #46494e;
+  --color-neutral-800: #31353b;
+  --color-neutral-900: #22262c;
+  --color-neutral-950: #14181f;
+
+  /* Signal — brick red. Unconfirmed detections on alert surfaces; the app's
+     error and danger color everywhere else. Never decoration. */
+  --color-signal-50: #fcf0f0;
+  --color-signal-100: #f8dede;
+  --color-signal-200: #f0bdbd;
+  --color-signal-300: #e59191;
+  --color-signal-400: #dd6b6b;
+  --color-signal-500: #d64545;
+  --color-signal-600: #b93838;
+  --color-signal-700: #962c2c;
+  --color-signal-800: #732424;
+  --color-signal-900: #501b1b;
+  --color-signal-950: #2e1414;
+
+  /* Confirm — muted deep teal-green. Human-verified / trust actions. */
+  --color-confirm-50: #eef5f3;
+  --color-confirm-100: #d8e8e3;
+  --color-confirm-200: #b2d1c8;
+  --color-confirm-300: #85b4a7;
+  --color-confirm-400: #5b9885;
+  --color-confirm-500: #3e7c6b;
+  --color-confirm-600: #336758;
+  --color-confirm-700: #2a5347;
+  --color-confirm-800: #224137;
+  --color-confirm-900: #1a3029;
+  --color-confirm-950: #12211d;
+}
+
+/* --- shadcn/ui semantic layer ------------------------------------------- */
+/* Light = Paper content surfaces. .dark = Ink chrome. Sections of the app   */
+/* opt into chrome by wrapping in `dark`, so primitives invert in place.     */
+:root {
+  --radius: 0.25rem;
+
+  --background: #f7f6f3;
+  --foreground: #14181f;
+  --card: #ffffff;
+  --card-foreground: #14181f;
+  --popover: #ffffff;
+  --popover-foreground: #14181f;
+  --primary: #14181f;
+  --primary-foreground: #f7f6f3;
+  --secondary: #e5e4e2;
+  --secondary-foreground: #22262c;
+  --muted: #e5e4e2;
+  --muted-foreground: #616467;
+  --accent: #e5e4e2;
+  --accent-foreground: #22262c;
+  --destructive: #d64545;
+  --destructive-foreground: #ffffff;
+  --border: #d0d0cf;
+  --input: #d0d0cf;
+  /* Focus lives on Confirm, so Signal stays reserved for real detections. */
+  --ring: #3e7c6b;
+}
+
+.dark {
+  --background: #14181f;
+  --foreground: #f7f6f3;
+  --card: #1b1f27;
+  --card-foreground: #f7f6f3;
+  --popover: #1b1f27;
+  --popover-foreground: #f7f6f3;
+  --primary: #f7f6f3;
+  --primary-foreground: #14181f;
+  --secondary: #22262c;
+  --secondary-foreground: #f7f6f3;
+  --muted: #22262c;
+  --muted-foreground: #9c9d9e;
+  --accent: #31353b;
+  --accent-foreground: #f7f6f3;
+  --destructive: #dd6b6b;
+  --destructive-foreground: #14181f;
+  --border: #31353b;
+  --input: #31353b;
+  --ring: #5b9885;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 6px);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-variant-ligatures: none;
+  }
+
+  /* Keyboard focus is always visible and never removed. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* Tabular figures everywhere metadata is rendered. */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer utilities {
+  /* Small-caps eyebrow used for section + column labels. */
+  .label-micro {
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: var(--text-micro--line-height);
+    letter-spacing: var(--text-micro--letter-spacing);
+    text-transform: uppercase;
+  }
+}
+
+/* Motion is opt-out at the root. Components that convey meaning through
+   duration (see HoldToConfirm) additionally switch to a non-timed
+   interaction rather than just running faster. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

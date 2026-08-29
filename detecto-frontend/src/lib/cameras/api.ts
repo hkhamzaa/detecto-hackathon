@@ -1,0 +1,383 @@
+import { USE_MOCKS } from '@/lib/config/mocks'
+import { useAuthStore } from '@/store/auth-store'
+
+/**
+ * Camera connection and the camera list.
+ *
+ * Same shape as `lib/auth/api.ts`: one exported function per operation, a real
+ * transport, and a dev mock that only ever runs in dev. A production build
+ * always takes the real path, whatever the env var says.
+ *
+ * The vocabulary here is deliberately the customer's, not the installer's. A
+ * recorder has *channels*; a camera has a *picture*. Protocol names belong in
+ * the box's firmware and in this file's URLs, never on screen.
+ */
+
+/* -------------------------------------------------------------------------- */
+/* Types                                                                      */
+/* -------------------------------------------------------------------------- */
+
+export type PairedBox = {
+  id: string
+  /** What the box calls itself, as printed on its own screen. */
+  label: string
+  /** Inputs the box can see. Shown so they can tell one box from another. */
+  channels: number
+}
+
+export type PairResult =
+  | { ok: true; box: PairedBox }
+  | { ok: false; code: 'invalid_code' }
+  | { ok: false; code: 'expired_code' }
+  | { ok: false; code: 'unavailable' }
+
+/** Why the box could see an input but could not get a picture from it. */
+export type CameraProblem = 'unreachable' | 'needs_password'
+
+export type DiscoveredCamera = {
+  id: string
+  /** What the recorder calls this input, e.g. "Channel 3". */
+  channel: string
+  /** The name the device reports for itself, when it reports one. */
+  suggestedName: string | null
+  /** Human-readable, e.g. "1920 × 1080". Null when the box could not read it. */
+  resolution: string | null
+  /** Null means the box got a picture and the camera is ready to add. */
+  problem: CameraProblem | null
+  /**
+   * The box always reports `'box'`. `'manual'` entries are built in the browser
+   * when someone types in a camera the box did not find, and carry an address.
+   */
+  source: 'box' | 'manual'
+  address: string | null
+}
+
+export type DiscoveryResult =
+  | { ok: true; cameras: DiscoveredCamera[] }
+  | { ok: false; code: 'box_offline' }
+  | { ok: false; code: 'unavailable' }
+
+export type Camera = {
+  id: string
+  name: string
+  zone: string
+  online: boolean
+  /** ISO timestamp of the last picture received, or null if there never was one. */
+  lastSeen: string | null
+}
+
+export type NewCamera = {
+  name: string
+  zone: string
+  /** Set for a camera the box found. */
+  discoveredId: string | null
+  /** Set instead for one typed in by hand. */
+  address: string | null
+}
+
+export type AddResult =
+  | { ok: true; cameras: Camera[] }
+  | { ok: false; code: 'unavailable' }
+
+export type ListResult =
+  | { ok: true; cameras: Camera[] }
+  | { ok: false; code: 'unavailable' }
+
+/* -------------------------------------------------------------------------- */
+/* Public surface                                                             */
+/* -------------------------------------------------------------------------- */
+
+export function pairBox(code: string): Promise<PairResult> {
+  return USE_MOCKS ? mockPair(code) : realPair(code)
+}
+
+export function discoverCameras(boxId: string): Promise<DiscoveryResult> {
+  return USE_MOCKS ? mockDiscover(boxId) : realDiscover(boxId)
+}
+
+export function addCameras(cameras: NewCamera[]): Promise<AddResult> {
+  return USE_MOCKS ? mockAdd(cameras) : realAdd(cameras)
+}
+
+export function listCameras(): Promise<ListResult> {
+  return USE_MOCKS ? mockList() : realList()
+}
+
+/* -------------------------------------------------------------------------- */
+/* Real transport                                                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Auth's own endpoints are reached with the refresh cookie; every other request
+ * carries the short-lived access token instead. Kept local to this module until
+ * a second feature needs it — one shared client is worth writing once there is
+ * something to share.
+ */
+function authHeaders(): Record<string, string> {
+  const token = useAuthStore.getState().accessToken
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+async function readObject(response: Response) {
+  const data: unknown = await response.json().catch(() => null)
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null
+  return data as Record<string, unknown>
+}
+
+function str(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function toDiscovered(value: unknown): DiscoveredCamera | null {
+  if (typeof value !== 'object' || value === null) return null
+  const c = value as Record<string, unknown>
+  const id = str(c.id)
+  const channel = str(c.channel)
+  if (!id || !channel) return null
+
+  const problem = str(c.problem)
+  return {
+    id,
+    channel,
+    suggestedName: str(c.suggestedName),
+    resolution: str(c.resolution),
+    problem: problem === 'unreachable' || problem === 'needs_password' ? problem : null,
+    source: 'box',
+    address: null,
+  }
+}
+
+function toCamera(value: unknown): Camera | null {
+  if (typeof value !== 'object' || value === null) return null
+  const c = value as Record<string, unknown>
+  const id = str(c.id)
+  const name = str(c.name)
+  if (!id || !name) return null
+
+  return {
+    id,
+    name,
+    zone: str(c.zone) ?? '',
+    online: c.online === true,
+    lastSeen: str(c.lastSeen),
+  }
+}
+
+function collect<T>(value: unknown, map: (item: unknown) => T | null): T[] {
+  if (!Array.isArray(value)) return []
+  return value.map(map).filter((item): item is T => item !== null)
+}
+
+async function realPair(code: string): Promise<PairResult> {
+  let response: Response
+  try {
+    response = await fetch('/api/boxes/pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ code }),
+    })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+
+  if (response.status === 404) return { ok: false, code: 'invalid_code' }
+  if (response.status === 410) return { ok: false, code: 'expired_code' }
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+
+  const payload = await readObject(response)
+  const id = payload ? str(payload.id) : null
+  if (!payload || !id) return { ok: false, code: 'unavailable' }
+
+  return {
+    ok: true,
+    box: {
+      id,
+      label: str(payload.label) ?? 'Detecto Box',
+      channels: typeof payload.channels === 'number' ? payload.channels : 0,
+    },
+  }
+}
+
+async function realDiscover(boxId: string): Promise<DiscoveryResult> {
+  let response: Response
+  try {
+    response = await fetch(`/api/boxes/${encodeURIComponent(boxId)}/discover`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+
+  // The box stopped answering the platform between pairing and discovery.
+  if (response.status === 409) return { ok: false, code: 'box_offline' }
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+
+  const payload = await readObject(response)
+  if (!payload) return { ok: false, code: 'unavailable' }
+  // An empty list is a real answer, not a failure. It gets its own screen.
+  return { ok: true, cameras: collect(payload.cameras, toDiscovered) }
+}
+
+async function realAdd(cameras: NewCamera[]): Promise<AddResult> {
+  let response: Response
+  try {
+    response = await fetch('/api/cameras', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ cameras }),
+    })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+  const payload = await readObject(response)
+  if (!payload) return { ok: false, code: 'unavailable' }
+  return { ok: true, cameras: collect(payload.cameras, toCamera) }
+}
+
+async function realList(): Promise<ListResult> {
+  let response: Response
+  try {
+    response = await fetch('/api/cameras', { headers: authHeaders() })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+  const payload = await readObject(response)
+  if (!payload) return { ok: false, code: 'unavailable' }
+  return { ok: true, cameras: collect(payload.cameras, toCamera) }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Dev mock — delete once /api/boxes and /api/cameras are live                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The first block of the pairing code picks the outcome, so every state in the
+ * flow can be reached without a backend:
+ *
+ *   DEMO-####   pairs, then finds five cameras, all of them ready
+ *   HALF-####   pairs, then finds five, two of which it cannot get a picture from
+ *   NONE-####   pairs, then finds nothing at all
+ *   DOWN-####   pairs, then the box stops answering before it can look
+ *   GONE-####   the code has expired
+ *   anything else — no such box
+ *
+ * The camera list starts empty, which is what a new organisation actually sees.
+ * Running the flow fills it, and a reload empties it again.
+ */
+const MOCK_DELAY = { pair: 900, discover: 2200, add: 700, list: 350 }
+
+let mockCameras: Camera[] = []
+let mockCounter = 0
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * The first of the code's two blocks. Read positionally, not by splitting on
+ * the separator — what arrives here is the normalised eight characters, and the
+ * dash the field draws while typing is never part of it.
+ */
+function firstBlock(code: string) {
+  return code
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 4)
+}
+
+async function mockPair(code: string): Promise<PairResult> {
+  await wait(MOCK_DELAY.pair)
+
+  const block = firstBlock(code)
+  if (block === 'GONE') return { ok: false, code: 'expired_code' }
+  if (!['DEMO', 'HALF', 'NONE', 'DOWN'].includes(block)) {
+    return { ok: false, code: 'invalid_code' }
+  }
+
+  return {
+    ok: true,
+    box: {
+      id: `box_${block.toLowerCase()}`,
+      label: 'Detecto Box · Front office',
+      channels: block === 'NONE' ? 0 : 8,
+    },
+  }
+}
+
+const MOCK_CHANNELS: Omit<DiscoveredCamera, 'problem' | 'source' | 'address'>[] = [
+  { id: 'ch1', channel: 'Channel 1', suggestedName: 'Front entrance', resolution: '1920 × 1080' },
+  { id: 'ch2', channel: 'Channel 2', suggestedName: null, resolution: '1920 × 1080' },
+  { id: 'ch3', channel: 'Channel 3', suggestedName: 'Loading bay', resolution: '2560 × 1440' },
+  { id: 'ch4', channel: 'Channel 4', suggestedName: null, resolution: '1280 × 720' },
+  { id: 'ch5', channel: 'Channel 5', suggestedName: 'Car park', resolution: '1920 × 1080' },
+]
+
+async function mockDiscover(boxId: string): Promise<DiscoveryResult> {
+  await wait(MOCK_DELAY.discover)
+
+  if (boxId === 'box_down') return { ok: false, code: 'box_offline' }
+  if (boxId === 'box_none') return { ok: true, cameras: [] }
+
+  const problems: Record<string, CameraProblem> =
+    boxId === 'box_half' ? { ch3: 'needs_password', ch5: 'unreachable' } : {}
+
+  return {
+    ok: true,
+    cameras: MOCK_CHANNELS.map((channel) => ({
+      ...channel,
+      problem: problems[channel.id] ?? null,
+      source: 'box' as const,
+      address: null,
+    })),
+  }
+}
+
+async function mockAdd(cameras: NewCamera[]): Promise<AddResult> {
+  await wait(MOCK_DELAY.add)
+
+  const added: Camera[] = cameras.map((camera) => {
+    mockCounter += 1
+    return {
+      id: `cam_${String(mockCounter).padStart(3, '0')}`,
+      name: camera.name,
+      zone: camera.zone,
+      // A camera the box already got a picture from is online the moment it is
+      // added. One typed in by hand has never been reached, so it is not.
+      online: camera.discoveredId !== null,
+      lastSeen: camera.discoveredId !== null ? new Date().toISOString() : null,
+    }
+  })
+
+  mockCameras = [...mockCameras, ...added]
+  return { ok: true, cameras: added }
+}
+
+async function mockList(): Promise<ListResult> {
+  await wait(MOCK_DELAY.list)
+  return { ok: true, cameras: mockCameras }
+}
+
+/**
+ * Moves every camera in one zone to another name.
+ *
+ * Exported for the zones mock, for the same reason `MOCK_BOXES_SILENT` is
+ * exported for the health mock: a zone is a name repeated across three stores,
+ * and renaming it has to reach all three or it breaks access scope. On a real
+ * backend that is one transaction; here it is three mock modules agreeing,
+ * and a demo where the cameras moved but the roles did not would be worse than
+ * no rename at all. All of them are dev mocks; they are deleted together.
+ */
+export function mockRewriteCameraZone(from: string, to: string): number {
+  let moved = 0
+  mockCameras = mockCameras.map((camera) => {
+    if (camera.zone.trim() !== from) return camera
+    moved += 1
+    return { ...camera, zone: to }
+  })
+  return moved
+}

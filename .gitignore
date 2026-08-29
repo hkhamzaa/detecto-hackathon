@@ -1,0 +1,17 @@
+# Large model weight files
+detecto-backend/Detecto_Demo_Package/models/*.pt
+
+# Large sample output videos
+detecto-backend/Detecto_Demo_Package/sample_outputs/*.mp4
+
+# Frontend build output
+detecto-frontend/dist/
+
+# Frontend dependencies
+detecto-frontend/node_modules/
+
+# Env files
+.env
+.env.local
+**/.env
+**/.env.local

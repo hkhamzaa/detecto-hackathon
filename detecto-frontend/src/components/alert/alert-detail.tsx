@@ -5,6 +5,7 @@ import { ArrowLeft } from 'lucide-react'
 import { AlertStatus } from '@/components/alert/alert-status'
 import { EvidenceFrame } from '@/components/alert/evidence-frame'
 import { HoldToConfirm } from '@/components/alert/hold-to-confirm'
+import { PipelineBadge } from '@/components/alert/pipeline-badge'
 import { PageHeader } from '@/components/app-shell/page-header'
 import { Button } from '@/components/ui/button'
 import { Panel, PanelBody } from '@/components/ui/panel'
@@ -21,6 +22,10 @@ import { useAuthStore } from '@/store/auth-store'
 
 const NO_PERMISSION =
   "You don't have permission to confirm or dismiss alerts. An administrator in your organisation can change that."
+
+/** Replaces the control's default claim that the decision reached a server. */
+const LOCAL_CONFIRMED_HINT =
+  'Escalation is now unlocked. This decision was recorded in this browser only — the beta pipeline has nowhere to save it.'
 
 const CARD_HEADER = {
   unconfirmed: { dot: 'bg-signal-500', text: 'text-signal-300', label: 'Unconfirmed detection' },
@@ -73,7 +78,11 @@ export function AlertDetail({
             </p>
           </PanelBody>
         </Panel>
-      ) : isError ? (
+      ) : /* KNOWN BUG (found investigating live alerts, left unfixed for now):
+            this branch wins over `data`, so a *background refetch* that fails
+            on an alert already loaded replaces it with "no such alert" while
+            the record is still in the cache and still correct. */
+      isError ? (
         <Panel label={notFound ? 'No such alert' : "Can't load this alert"} tone="signal">
           <PanelBody>
             <p className="max-w-2xl text-meta text-neutral-600">
@@ -107,6 +116,15 @@ function ConfirmationCard({ alert }: { alert: Alert }) {
   const waiting = alert.status === 'unconfirmed'
   const header = CARD_HEADER[alert.status]
 
+  // Keyed on the pipeline, not on `decisionScope`. The control shows its
+  // confirmed copy the instant it is pressed, while the mutation is still in
+  // flight — `decisionScope` is not set until that resolves, and by then
+  // `waiting` is false and the control has unmounted. Asking what raised the
+  // alert is the only question that has an answer at the moment the copy is
+  // read. (`decisionScope` is still honoured, for a re-render mid-flight.)
+  const localOnly =
+    alert.pipelineStatus === 'beta' || alert.decisionScope === 'local'
+
   const decide = (choice: 'confirm' | 'dismiss') => {
     decision.mutate(choice, { onError: () => setResetKey((key) => key + 1) })
   }
@@ -119,7 +137,10 @@ function ConfirmationCard({ alert }: { alert: Alert }) {
             <span aria-hidden="true" className={`size-2 rounded-full ${header.dot}`} />
             <span className={`label-micro ${header.text}`}>{header.label}</span>
           </div>
-          <span className="font-mono text-data text-neutral-500">{alert.id}</span>
+          <div className="flex items-center gap-3">
+            <PipelineBadge alert={alert} />
+            <span className="font-mono text-data text-neutral-500">{alert.id}</span>
+          </div>
         </div>
 
         <div className="grid gap-6 p-5 sm:grid-cols-[minmax(0,1fr)_16rem] sm:p-6">
@@ -156,6 +177,7 @@ function ConfirmationCard({ alert }: { alert: Alert }) {
                     key={resetKey}
                     disabled={!canDecide || decision.isPending}
                     disabledReason={!canDecide ? NO_PERMISSION : undefined}
+                    confirmedHint={localOnly ? LOCAL_CONFIRMED_HINT : undefined}
                     onConfirm={() => decide('confirm')}
                   />
 
@@ -195,6 +217,7 @@ function ConfirmationCard({ alert }: { alert: Alert }) {
           <div className="order-1 sm:order-2">
             <EvidenceFrame
               caption={`${alert.cameraId} · ${formatShort(alert.detectedAt)}`}
+              image={alert.frameImage}
             />
           </div>
         </div>
@@ -251,6 +274,9 @@ function Outcome({ alert }: { alert: Alert }) {
   const when = alert.decidedAt ? formatShort(alert.decidedAt) : 'an unknown time'
 
   const confirmed = alert.status === 'confirmed'
+  // A decision the beta pipeline had nowhere to send. Everything below has to
+  // stop short of saying it was recorded, because it was not.
+  const local = alert.decisionScope === 'local'
 
   return (
     <Panel
@@ -264,9 +290,22 @@ function Outcome({ alert }: { alert: Alert }) {
             dismissing has no control of its own to speak for it. */}
         <p role="status" className="max-w-2xl text-body text-neutral-700">
           {confirmed
-            ? `Confirmed by ${who} at ${when}, and recorded against that account.`
+            ? // "Recorded against that account" is a claim about a server, so a
+              // local-only decision does not get to make it.
+              `Confirmed by ${who} at ${when}${local ? '.' : ', and recorded against that account.'}`
             : `Marked as a false positive by ${who} at ${when}.`}
         </p>
+
+        {local && (
+          <p className="mt-4 max-w-2xl text-meta text-neutral-600">
+            <strong className="font-medium text-ink">
+              Recorded locally this session only — not saved to a server.
+            </strong>{' '}
+            This alert came from the beta pipeline, which has nowhere to keep a
+            decision yet. Reloading this page loses it, and nobody else can see
+            it.
+          </p>
+        )}
 
         <p className="mt-4 max-w-2xl text-meta text-neutral-600">
           {confirmed ? (

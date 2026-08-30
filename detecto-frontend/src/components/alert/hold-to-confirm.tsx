@@ -29,8 +29,20 @@ export type HoldToConfirmProps = {
   disabledReason?: string
   /** Force the two-stage variant regardless of OS motion preference. */
   forceTwoStage?: boolean
+  /**
+   * What the hint says once confirmed.
+   *
+   * The default claims the decision is recorded against the operator's ID,
+   * which is true wherever a confirmation reaches a server. A caller whose
+   * decision does not reach one has to say so itself — this control cannot
+   * know, and the sentence is too consequential to leave as a guess.
+   */
+  confirmedHint?: string
   className?: string
 }
+
+const CONFIRMED_HINT =
+  'Escalation is now unlocked. This action is recorded against your operator ID.'
 
 const HOLD_KEYS = new Set([' ', 'Spacebar', 'Enter'])
 
@@ -53,6 +65,7 @@ export function HoldToConfirm({
   disabled = false,
   disabledReason,
   forceTwoStage = false,
+  confirmedHint = CONFIRMED_HINT,
   className,
 }: HoldToConfirmProps) {
   const prefersReduced = useReducedMotion()
@@ -285,7 +298,7 @@ export function HoldToConfirm({
         {disabled && disabledReason
           ? disabledReason
           : confirmed
-            ? 'Escalation is now unlocked. This action is recorded against your operator ID.'
+            ? confirmedHint
             : twoStage
               ? 'Activate once to arm, then activate again to take responsibility for this flag.'
               : 'Press and hold — with a pointer, or with Space / Enter — until the bar fills.'}

@@ -1,0 +1,28 @@
+# Dependencies for inference/live_infer.py
+#
+# Verified working on Windows 11 / Python 3.13.7 / CPU. Versions below are the
+# exact ones the script was run against.
+#
+# PyTorch is intentionally NOT pinned here -- install it first and separately,
+# because the right wheel depends on your accelerator:
+#
+#   CPU:   pip install --index-url https://download.pytorch.org/whl/cpu \
+#              torch==2.13.0 torchvision==0.28.0
+#   CUDA:  see https://pytorch.org/get-started/locally/ for the matching build
+#
+# Verified with torch 2.13.0+cpu and torchvision 0.28.0+cpu. Anything from
+# torch>=2.6 should work: the violence checkpoint carries a .storage_alignment
+# entry, which only torch>=2.6 writes, and torch>=2.6 is also the first release
+# supporting Python 3.13. It loads under weights_only=True (it is a bare
+# state_dict of tensors), so no unpickling of arbitrary objects is required.
+
+opencv-python==5.0.0.93
+ultralytics==8.4.135
+numpy==2.5.2
+
+# On ultralytics: the weapon detector was TRAINED with ultralytics 8.0.230
+# (metadata inside weapon_detector_yolov8.pt says 8.0.230, dated 2024-01-01,
+# base model yolov8n.pt, imgsz=640, classes {0: guns, 1: knife}). It is loaded
+# here with 8.4.135 instead -- ultralytics reads older checkpoints fine, and
+# 8.0.230 predates Python 3.13 support. Pin 8.0.230 only if you also drop to an
+# older Python and torch, and re-verify the detections if you do.

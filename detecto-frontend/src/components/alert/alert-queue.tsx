@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react'
 
 import { PageHeader } from '@/components/app-shell/page-header'
 import { AlertStatus } from '@/components/alert/alert-status'
+import { PipelineBadge } from '@/components/alert/pipeline-badge'
 import { Button } from '@/components/ui/button'
 import { Panel, PanelBody } from '@/components/ui/panel'
 import {
@@ -15,6 +16,7 @@ import {
 } from '@/components/ui/table'
 import type { Alert, AlertStatus as Status } from '@/lib/alerts/api'
 import { confidenceLabel, detectionLabel } from '@/lib/alerts/labels'
+import { useLiveAlerts } from '@/lib/alerts/live'
 import { useAlerts } from '@/lib/alerts/queries'
 import { formatShort, formatTimestamp } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -65,6 +67,11 @@ export function AlertQueue({
 }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const { data: alerts, isPending, isError, refetch, isFetching } = useAlerts()
+
+  // Writes new detections into the same cache `useAlerts` just read from, so
+  // they arrive as rows in the list below rather than anywhere new. A no-op
+  // unless VITE_LIVE_ALERTS is on.
+  useLiveAlerts()
 
   const requested = searchParams.get('status')
   const segment: Segment = isSegment(requested) ? requested : DEFAULT_SEGMENT
@@ -318,7 +325,10 @@ function Results({
                 </TableCell>
 
                 <TableCell className="whitespace-nowrap text-neutral-700">
-                  {detectionLabel(alert)}
+                  <span className="inline-flex items-center gap-2">
+                    {detectionLabel(alert)}
+                    <PipelineBadge alert={alert} />
+                  </span>
                 </TableCell>
 
                 <TableCell className="text-right font-mono text-data text-ink">
@@ -333,6 +343,13 @@ function Results({
 
                 <TableCell>
                   <AlertStatus status={alert.status} className="text-meta" />
+                  {/* Otherwise a decision that only exists in this browser
+                      reads exactly like one the whole team can see. */}
+                  {alert.decisionScope === 'local' && (
+                    <span className="mt-0.5 block whitespace-nowrap text-meta text-neutral-500">
+                      Local only
+                    </span>
+                  )}
                 </TableCell>
               </TableRow>
             ))}

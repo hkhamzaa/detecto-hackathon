@@ -1,0 +1,16 @@
+# Socket.IO server dependencies.
+#
+# These sit on top of inference/requirements.txt -- the server runs
+# live_infer.py as a subprocess with the same interpreter, so both sets must be
+# installed in the same environment.
+#
+# python-socketio 5.x speaks Socket.IO protocol v5 / Engine.IO v4, which is
+# what the frontend's socket.io-client ^4.8.3 expects.
+
+python-socketio>=5.11,<6
+fastapi>=0.115
+uvicorn>=0.30
+
+# Only needed to run scripts/capture_alerts.py, the Socket.IO client used to
+# verify what actually goes out over the wire. Not needed to serve.
+aiohttp>=3.9

@@ -39,6 +39,27 @@ export type Alert = {
   /** Who took responsibility, and when. Both null while it is still waiting. */
   decidedBy: string | null
   decidedAt: string | null
+  /**
+   * Set only by a pipeline whose output is not trusted yet, so the interface can
+   * say so rather than presenting a beta detection as an ordinary one.
+   *
+   * Optional rather than `string | null` — the rest of this type describes facts
+   * every alert has, even when the value is empty. This one is a claim only the
+   * raising pipeline makes, and its absence is the normal case.
+   */
+  pipelineStatus?: 'beta'
+  /**
+   * The still the model flagged, as a self-contained `data:` URL. Only a
+   * pipeline that captures frames sets it; the evidence panel falls back to its
+   * placeholder when it is absent.
+   */
+  frameImage?: string
+  /**
+   * Set when the decision on this alert was only ever written to this browser,
+   * because the pipeline that raised it has nowhere to record one. Never set by
+   * anything that reached a server — that is the entire distinction it draws.
+   */
+  decisionScope?: 'local'
 }
 
 export type AlertsResult =
@@ -93,6 +114,20 @@ function str(value: unknown): string | null {
 const STATUSES: string[] = ['unconfirmed', 'confirmed', 'dismissed']
 
 /**
+ * Only a self-contained image is allowed into the evidence panel.
+ *
+ * The value ends up in an `img src`, so an arbitrary URL off the wire would let
+ * whatever served it watch who opened which alert, and when. A `data:` URL
+ * cannot: it carries its own bytes and reaches nothing.
+ */
+const IMAGE_PREFIXES = ['data:image/jpeg;base64,', 'data:image/png;base64,']
+
+function imageData(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return IMAGE_PREFIXES.some((prefix) => value.startsWith(prefix)) ? value : undefined
+}
+
+/**
  * One alert off the wire, or `null` if it is not one.
  *
  * Exported because analytics reads the same records over a longer window and
@@ -111,7 +146,7 @@ export function parseAlert(value: unknown): Alert | null {
   if (!id || !detectedAt || !status || !STATUSES.includes(status)) return null
   if (kind !== 'weapon' && kind !== 'violence') return null
 
-  return {
+  const alert: Alert = {
     id,
     cameraId: str(a.cameraId) ?? '',
     cameraName: str(a.cameraName) ?? 'Unknown camera',
@@ -125,6 +160,20 @@ export function parseAlert(value: unknown): Alert | null {
     decidedBy: str(a.decidedBy),
     decidedAt: str(a.decidedAt),
   }
+
+  // Attached rather than defaulted: an alert off the trusted path should not
+  // carry this key at all, and an unrecognised value is not a licence to invent
+  // a reassuring one. Only the exact claim survives.
+  if (str(a.pipelineStatus) === 'beta') alert.pipelineStatus = 'beta'
+
+  const frameImage = imageData(a.frameImage)
+  if (frameImage) alert.frameImage = frameImage
+
+  // `decisionScope` is deliberately not read off the wire. It means "this was
+  // never recorded anywhere", which is a claim only this browser can make about
+  // its own cache — a server saying it would be saying something incoherent.
+
+  return alert
 }
 
 async function readObject(response: Response) {

@@ -23,9 +23,17 @@ import { useAuthStore } from '@/store/auth-store'
 const NO_PERMISSION =
   "You don't have permission to confirm or dismiss alerts. An administrator in your organisation can change that."
 
-/** Replaces the control's default claim that the decision reached a server. */
-const LOCAL_CONFIRMED_HINT =
-  'Escalation is now unlocked. This decision was recorded in this browser only — the beta pipeline has nowhere to save it.'
+/**
+ * Adds to the control's default confirmed hint rather than replacing it —
+ * the default's claim ("recorded against your operator ID") is true here too
+ * now that a beta-pipeline alert reaches a server exactly like any other.
+ * What's still worth saying is that the *pipeline*, not the record of the
+ * decision, is unverified.
+ */
+const BETA_CONFIRMED_HINT =
+  'Escalation is now unlocked. This action is recorded against your operator ID. ' +
+  'This came from an unverified detection pipeline — the detection type and ' +
+  'confidence have not been confirmed as accurate.'
 
 const CARD_HEADER = {
   unconfirmed: { dot: 'bg-signal-500', text: 'text-signal-300', label: 'Unconfirmed detection' },
@@ -116,14 +124,7 @@ function ConfirmationCard({ alert }: { alert: Alert }) {
   const waiting = alert.status === 'unconfirmed'
   const header = CARD_HEADER[alert.status]
 
-  // Keyed on the pipeline, not on `decisionScope`. The control shows its
-  // confirmed copy the instant it is pressed, while the mutation is still in
-  // flight — `decisionScope` is not set until that resolves, and by then
-  // `waiting` is false and the control has unmounted. Asking what raised the
-  // alert is the only question that has an answer at the moment the copy is
-  // read. (`decisionScope` is still honoured, for a re-render mid-flight.)
-  const localOnly =
-    alert.pipelineStatus === 'beta' || alert.decisionScope === 'local'
+  const beta = alert.pipelineStatus === 'beta'
 
   const decide = (choice: 'confirm' | 'dismiss') => {
     decision.mutate(choice, { onError: () => setResetKey((key) => key + 1) })
@@ -177,7 +178,7 @@ function ConfirmationCard({ alert }: { alert: Alert }) {
                     key={resetKey}
                     disabled={!canDecide || decision.isPending}
                     disabledReason={!canDecide ? NO_PERMISSION : undefined}
-                    confirmedHint={localOnly ? LOCAL_CONFIRMED_HINT : undefined}
+                    confirmedHint={beta ? BETA_CONFIRMED_HINT : undefined}
                     onConfirm={() => decide('confirm')}
                   />
 
@@ -274,9 +275,10 @@ function Outcome({ alert }: { alert: Alert }) {
   const when = alert.decidedAt ? formatShort(alert.decidedAt) : 'an unknown time'
 
   const confirmed = alert.status === 'confirmed'
-  // A decision the beta pipeline had nowhere to send. Everything below has to
-  // stop short of saying it was recorded, because it was not.
-  const local = alert.decisionScope === 'local'
+  // The model that raised this alert is unverified, not the record of the
+  // decision — every decision now reaches a server the same way, beta
+  // pipeline or not. See BETA_CONFIRMED_HINT above for the same distinction.
+  const beta = alert.pipelineStatus === 'beta'
 
   return (
     <Panel
@@ -290,20 +292,18 @@ function Outcome({ alert }: { alert: Alert }) {
             dismissing has no control of its own to speak for it. */}
         <p role="status" className="max-w-2xl text-body text-neutral-700">
           {confirmed
-            ? // "Recorded against that account" is a claim about a server, so a
-              // local-only decision does not get to make it.
-              `Confirmed by ${who} at ${when}${local ? '.' : ', and recorded against that account.'}`
+            ? `Confirmed by ${who} at ${when}, and recorded against that account.`
             : `Marked as a false positive by ${who} at ${when}.`}
         </p>
 
-        {local && (
+        {beta && (
           <p className="mt-4 max-w-2xl text-meta text-neutral-600">
             <strong className="font-medium text-ink">
-              Recorded locally this session only — not saved to a server.
+              This came from an unverified detection pipeline.
             </strong>{' '}
-            This alert came from the beta pipeline, which has nowhere to keep a
-            decision yet. Reloading this page loses it, and nobody else can see
-            it.
+            The decision above is recorded the same as any other alert. What
+            is not yet confirmed as accurate is the pipeline's own output —
+            the detection type and confidence it reported.
           </p>
         )}
 

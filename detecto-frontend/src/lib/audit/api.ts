@@ -60,7 +60,9 @@ import { useAuthStore } from '@/store/auth-store'
  * Deliberately a closed list of real operations rather than a generic
  * "activity" type. Each one corresponds to a function that already exists in
  * this app — `saveRole`, `deleteRole`, `invitePerson`, `setCameraModule`,
- * `setZoneModule`, `setRoute`, `setEscalation`, `confirmAlert`, `dismissAlert`
+ * `setZoneModule`, `setRoute`, `setEscalation`, `confirmAlert`, `dismissAlert`,
+ * `editCamera`, `saveOrgSettings`, `login`, `logout`, `renameZone`, `mergeZones`,
+ * `requestPlanChange`, `withdrawPlanChange`, `setTenantStatus`, `setTenantNote`
  * — so the log describes what the product can actually do, and adding a row
  * here means somebody added a capability rather than a label.
  */
@@ -81,6 +83,18 @@ export type AuditAction =
   | 'notifications.escalation_changed'
   | 'alert.confirmed'
   | 'alert.dismissed'
+  | 'camera.updated'
+  | 'org.settings_changed'
+  | 'auth.logged_in'
+  | 'auth.logged_out'
+  | 'auth.password_changed'
+  | 'zone.renamed'
+  | 'zone.merged'
+  | 'billing.plan_change_requested'
+  | 'billing.plan_change_withdrawn'
+  | 'platform.tenant_suspended'
+  | 'platform.tenant_reactivated'
+  | 'platform.support_note_changed'
 
 export const AUDIT_ACTIONS: AuditAction[] = [
   'role.created',
@@ -99,6 +113,18 @@ export const AUDIT_ACTIONS: AuditAction[] = [
   'notifications.escalation_changed',
   'alert.confirmed',
   'alert.dismissed',
+  'camera.updated',
+  'org.settings_changed',
+  'auth.logged_in',
+  'auth.logged_out',
+  'auth.password_changed',
+  'zone.renamed',
+  'zone.merged',
+  'billing.plan_change_requested',
+  'billing.plan_change_withdrawn',
+  'platform.tenant_suspended',
+  'platform.tenant_reactivated',
+  'platform.support_note_changed',
 ]
 
 /**
@@ -118,6 +144,13 @@ export type AuditActor = {
    * The role they held at the time. Null when the action came from a record
    * that did not capture one — see the note about alerts at the top of this
    * file. Never guessed at from their role today.
+   *
+   * For a `platform.*` entry, this is never null and never a real org role —
+   * it's a literal string like `"Detecto Platform"`. Those entries are
+   * written by a super admin, who holds no role in the org they land on;
+   * the literal string is what makes one visually distinct from an
+   * org-internal actor at a glance, rather than reading as an ordinary
+   * member whose role happened to go missing.
    */
   roleName: string | null
 }
@@ -261,6 +294,12 @@ const ACTORS: Record<string, AuditActor> = {
   rhea: { id: 'usr_rhea', name: 'Rhea Mehta', roleName: 'Site supervisor' },
   tomas: { id: 'usr_tomas', name: 'Tomas Bergstrom', roleName: 'Rota lead' },
   joan: { id: 'usr_joan', name: 'Joan Whitfield', roleName: 'Night shift' },
+  /**
+   * Never a member of this org — see the note on `AuditActor.roleName`.
+   * `roleName` is the literal string a `platform.*` entry always carries,
+   * never null and never a role this org actually has.
+   */
+  support: { id: 'usr_platform_support', name: 'Priya Shah', roleName: 'Detecto Platform' },
 }
 
 /**
@@ -285,6 +324,12 @@ const SEEDED: {
 }[] = [
   {
     actor: 'ade',
+    action: 'auth.logged_in',
+    hoursAgo: 23 * 24,
+    summary: 'Signed in',
+  },
+  {
+    actor: 'ade',
     action: 'camera.added',
     hoursAgo: 22 * 24,
     summary: 'Added 4 cameras from a newly paired Detecto Box',
@@ -292,6 +337,13 @@ const SEEDED: {
       'Main entrance and West corridor to Front of house; Loading bay and Gate to Yard.',
       'Connecting a camera does not switch detection on — that was done separately.',
     ],
+  },
+  {
+    actor: 'ade',
+    action: 'zone.renamed',
+    hoursAgo: 21 * 24 + 6,
+    summary: 'Renamed the zone "West corridor" to "Level 2"',
+    detail: ['2 cameras moved.', '1 role updated.'],
   },
   {
     actor: 'ade',
@@ -356,6 +408,13 @@ const SEEDED: {
   },
   {
     actor: 'ade',
+    action: 'org.settings_changed',
+    hoursAgo: 10 * 24,
+    summary: 'Changed organisation settings',
+    detail: ['Idle timeout is now 30 minutes.'],
+  },
+  {
+    actor: 'ade',
     action: 'role.edited',
     hoursAgo: 9 * 24,
     summary: 'Edited the role Night shift',
@@ -386,6 +445,20 @@ const SEEDED: {
       '1 person was moved to Site supervisor and keeps everything that role allows.',
       'Nobody was left without a role.',
     ],
+  },
+  {
+    actor: 'ade',
+    action: 'billing.plan_change_requested',
+    hoursAgo: 5 * 24 + 2,
+    summary: 'Requested a move to Estate',
+    detail: ['Currently on Site.', 'No charge has been made — this is a request only.'],
+  },
+  {
+    actor: 'support',
+    action: 'platform.support_note_changed',
+    hoursAgo: 5 * 24 + 1,
+    summary: 'Support note updated by Detecto',
+    detail: ['Not shown to anyone on this account. Visible to Detecto staff only.'],
   },
   {
     actor: 'ade',

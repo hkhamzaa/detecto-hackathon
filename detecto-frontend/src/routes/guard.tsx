@@ -7,8 +7,11 @@ import { useAuthStore } from '@/store/auth-store'
 
 /**
  * No session, no shell. The access token lives in memory only, so a reload
- * lands here — until the refresh call described in `auth-store.ts` exists, that
- * is a trip back to /login rather than a resumed session.
+ * lands here too — but not before `main.tsx` has already given the boot-time
+ * silent refresh (`lib/auth/session.ts`) a chance to repopulate it from the
+ * httpOnly refresh cookie. By the time this renders, "no claims" means the
+ * refresh genuinely failed (no cookie, or it's expired/revoked), not just
+ * that the reload hasn't caught up yet.
  */
 export function RequireSession({ children }: { children: ReactNode }) {
   const claims = useAuthStore((s) => s.claims)

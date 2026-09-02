@@ -20,10 +20,11 @@ type AuthState = {
  * In-memory is not immune to XSS either; it is simply the smallest surface
  * available to a browser client, and it means a stolen token dies with the tab.
  *
- * Boot seam: an app-level effect should call the refresh endpoint once on load
- * and `signIn` with whatever comes back, so a reload resumes the session
- * instead of bouncing to /login. That is a backend-dependent step, so it is
- * not wired up yet.
+ * Boot seam: `main.tsx` calls the refresh endpoint once on load
+ * (`lib/auth/session.ts`'s `bootstrapSession`) and `signIn`s with whatever
+ * comes back, so a reload resumes the session instead of bouncing to
+ * /login. The same module's fetch interceptor does the same thing
+ * mid-session, on a 401 from any other call.
  */
 export const useAuthStore = create<AuthState>((set) => ({
   accessToken: null,

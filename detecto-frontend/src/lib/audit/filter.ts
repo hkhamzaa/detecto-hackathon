@@ -15,11 +15,16 @@ import type { AuditAction, AuditActor, AuditEntry } from '@/lib/audit/api'
 /* -------------------------------------------------------------------------- */
 
 /**
- * Sixteen actions is too many to choose from and six areas is about right, so
- * the filter offers the area and the table shows the action. The group is the
- * prefix of the action id, which means a new action joins its group by being
- * named correctly rather than by being added to a second list that could
- * disagree with the first.
+ * Twenty-seven actions is too many to choose from and eleven areas is about
+ * right, so the filter offers the area and the table shows the action. The
+ * group is the prefix of the action id, which means a new action joins its
+ * group by being named correctly rather than by being added to a second
+ * list that could disagree with the first.
+ *
+ * `platform` is not like the other ten: every other group names something
+ * someone *in this org* did. A `platform.*` entry is the one kind of row
+ * whose actor was never a member of the org it appears on — see the note
+ * on `AuditActor.roleName` in `lib/audit/api.ts`.
  */
 export type ActionGroup =
   | 'role'
@@ -28,6 +33,11 @@ export type ActionGroup =
   | 'module'
   | 'notifications'
   | 'alert'
+  | 'org'
+  | 'auth'
+  | 'zone'
+  | 'billing'
+  | 'platform'
 
 export const ACTION_GROUPS: { id: ActionGroup; label: string }[] = [
   { id: 'role', label: 'Roles and permissions' },
@@ -36,6 +46,11 @@ export const ACTION_GROUPS: { id: ActionGroup; label: string }[] = [
   { id: 'module', label: 'Detection modules' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'alert', label: 'Alert decisions' },
+  { id: 'org', label: 'Organisation settings' },
+  { id: 'auth', label: 'Sign-in activity' },
+  { id: 'zone', label: 'Zones' },
+  { id: 'billing', label: 'Billing' },
+  { id: 'platform', label: 'Detecto platform actions' },
 ]
 
 export function groupOf(action: AuditAction): ActionGroup {
@@ -64,6 +79,18 @@ const ACTION_LABEL: Record<AuditAction, string> = {
   'notifications.escalation_changed': 'Escalation changed',
   'alert.confirmed': 'Alert confirmed',
   'alert.dismissed': 'Alert dismissed',
+  'camera.updated': 'Camera updated',
+  'org.settings_changed': 'Organisation settings changed',
+  'auth.logged_in': 'Signed in',
+  'auth.logged_out': 'Signed out',
+  'auth.password_changed': 'Changed their password',
+  'zone.renamed': 'Zone renamed',
+  'zone.merged': 'Zones merged',
+  'billing.plan_change_requested': 'Plan change requested',
+  'billing.plan_change_withdrawn': 'Plan change withdrawn',
+  'platform.tenant_suspended': 'Account suspended by Detecto',
+  'platform.tenant_reactivated': 'Account reactivated by Detecto',
+  'platform.support_note_changed': 'Support note updated by Detecto',
 }
 
 export function actionLabel(action: AuditAction): string {

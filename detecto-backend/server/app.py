@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Socket.IO server that turns Phase 1's JSONL stream into frontend alerts.
 
-Thin by design. It owns three jobs and nothing else:
+Thin by design. It owns four jobs and nothing else:
 
   1. Run `inference/live_infer.py` as a subprocess and read its JSONL stdout.
   2. Drop every `Normal` window; translate the rest into the frontend's `Alert`
      shape (see `translate.py` -- the shape is copied from the frontend, not
      designed here).
   3. Emit each one on `alert:new` and log what went out.
+  4. POST each one to the Node API (`detecto-backend/api`) so it durably
+     exists in Postgres, not only in flight over the socket. Best-effort:
+     see `Pipeline._persist` for why a failure here never takes the socket
+     feed down with it.
 
-No authentication, no persistence, no multi-camera fan-out. One hardcoded feed,
-matching Phase 1. Alerts exist only in flight: a client that connects late has
-missed whatever came before it.
+No user authentication of its own, no multi-camera fan-out. One hardcoded
+feed, matching Phase 1. The Node API is reached with a shared internal key
+(`DETECTO_API_KEY`), not a user session -- see server/README.md.
 
 The inference script is run as a subprocess rather than imported because it is
 a CLI that owns its own capture loop and pacing, and because a crash in a model
@@ -29,6 +33,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import socketio
 import uvicorn
 from fastapi import FastAPI
@@ -107,6 +112,15 @@ class Config:
         self.max_events = int(os.environ.get("DETECTO_MAX_EVENTS", "0"))
         self.log_level = os.environ.get("DETECTO_LOG_LEVEL", "INFO").upper()
 
+        # Where the Node API (detecto-backend/api) listens, and the shared
+        # secret it checks on POST /api/alerts. Required, not defaulted to
+        # an empty string: a server that would silently POST with no key
+        # (and get a uniform 401 from every alert, forever) is a worse
+        # failure mode than one that refuses to start and says why.
+        self.api_url = os.environ.get("DETECTO_API_URL", "http://127.0.0.1:4000")
+        self.api_key = os.environ.get("DETECTO_API_KEY")
+        self.api_timeout_seconds = float(os.environ.get("DETECTO_API_TIMEOUT_SECONDS", "5"))
+
     def infer_command(self) -> list[str]:
         command = [
             self.python,
@@ -183,15 +197,33 @@ class Pipeline:
         self.skipped = 0
         self.merged = 0
         self.emitted = 0
+        self.persisted = 0
+        self.persist_failed = 0
+
+        # One session for the process's lifetime, not one per POST -- reuses
+        # the connection pool rather than paying a new TCP+TLS-less handshake
+        # per alert.
+        self.http: aiohttp.ClientSession | None = None
+        # Persist calls are fired without awaiting them inline (see
+        # `_handle`), so the pipeline doesn't stall on an HTTP round trip
+        # between one alert and the next. Tracked here so `stop()` can wait
+        # for whatever is still in flight instead of cancelling it mid-POST.
+        self.persist_tasks: set[asyncio.Task[None]] = set()
 
     def _tally(self) -> str:
         return (
             f"{self.seen} window(s) seen, {self.skipped} Normal skipped, "
             f"{self.merged} merged into open incidents, "
-            f"{self.emitted} alert(s) emitted"
+            f"{self.emitted} alert(s) emitted, "
+            f"{self.persisted} persisted, {self.persist_failed} persist failure(s)"
         )
 
     async def start(self) -> None:
+        self.http = aiohttp.ClientSession(
+            headers={"X-Internal-Api-Key": config.api_key},
+            timeout=aiohttp.ClientTimeout(total=config.api_timeout_seconds),
+        )
+
         command = config.infer_command()
         log.info("starting inference: %s", " ".join(command))
         log.info(
@@ -199,6 +231,7 @@ class Pipeline:
             config.camera_id, config.camera_name, config.zone,
             config.model, config.realtime,
         )
+        log.info("persisting alerts to %s/api/alerts", config.api_url)
 
         self.process = await asyncio.create_subprocess_exec(
             *command,
@@ -221,6 +254,15 @@ class Pipeline:
             except asyncio.TimeoutError:
                 self.process.kill()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+
+        # Let whatever POSTs are still in flight finish rather than cancelling
+        # them -- an alert that made it onto the socket deserves its best shot
+        # at also making it into Postgres before the process exits.
+        if self.persist_tasks:
+            await asyncio.gather(*self.persist_tasks, return_exceptions=True)
+        if self.http:
+            await self.http.close()
+
         log.info("stopped: %s", self._tally())
 
     async def _read_events(self) -> None:
@@ -290,6 +332,14 @@ class Pipeline:
         await sio.emit(ALERT_EVENT, alert)
         self.emitted += 1
 
+        # Fired, not awaited: persistence must never add HTTP latency to the
+        # gap between one alert reaching the socket and the next one being
+        # able to. See `_persist` for why a failure here is swallowed rather
+        # than raised.
+        task = asyncio.create_task(self._persist(alert), name=f"persist-{alert['id']}")
+        self.persist_tasks.add(task)
+        task.add_done_callback(self.persist_tasks.discard)
+
         # The frame is tens of kilobytes of base64 and would bury every other
         # line, so the log carries its size instead of its contents.
         loggable = dict(alert)
@@ -301,6 +351,41 @@ class Pipeline:
             "%s -> %d client(s) | %s",
             ALERT_EVENT, len(_clients), json.dumps(loggable, separators=(",", ":")),
         )
+
+    async def _persist(self, alert: dict[str, Any]) -> None:
+        """POSTs one alert to the Node API so it durably exists in Postgres.
+
+        Best-effort by design: this server's one job before this task was
+        keeping the socket feed alive, and a database (or network, or API
+        process) hiccup must not take that down with it. Every failure here
+        is logged and counted, never raised -- the socket emission above has
+        already happened by the time this runs, so the operator still sees
+        the alert either way, with persistence failure visible only in this
+        server's own logs and its `/health` tally.
+        """
+        assert self.http
+        try:
+            async with self.http.post(f"{config.api_url}/api/alerts", json=alert) as response:
+                if response.status == 201:
+                    self.persisted += 1
+                    return
+                if response.status == 409:
+                    # Same id as an earlier run -- this server's own sequence
+                    # resets to ALR-0001 on every restart, so a collision
+                    # with already-persisted data is expected, not a fault.
+                    self.persisted += 1
+                    log.debug("alert %s already persisted (409, skipping)", alert["id"])
+                    return
+
+                body = await response.text()
+                self.persist_failed += 1
+                log.warning(
+                    "failed to persist %s: HTTP %d %s",
+                    alert["id"], response.status, body[:300],
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            self.persist_failed += 1
+            log.warning("failed to persist %s: %s: %s", alert["id"], type(exc).__name__, exc)
 
 
 pipeline = Pipeline()
@@ -315,6 +400,11 @@ async def lifespan(_: FastAPI):
     for path in (INFER_SCRIPT, config.video):
         if not path.exists():
             raise SystemExit(f"[error] missing file: {path}")
+    if not config.api_key:
+        raise SystemExit(
+            "[error] DETECTO_API_KEY is not set. It must match INTERNAL_API_KEY "
+            "in detecto-backend/api's environment -- see server/README.md."
+        )
     await pipeline.start()
     try:
         yield
@@ -336,6 +426,8 @@ async def health() -> dict[str, Any]:
         "normalSkipped": pipeline.skipped,
         "mergedIntoIncidents": pipeline.merged,
         "alertsEmitted": pipeline.emitted,
+        "alertsPersisted": pipeline.persisted,
+        "persistFailures": pipeline.persist_failed,
         "event": ALERT_EVENT,
         PIPELINE_STATUS_KEY: PIPELINE_STATUS,
     }

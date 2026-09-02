@@ -13,6 +13,24 @@ export default defineConfig({
   },
 
   /**
+   * Every module's real transport (see lib/alerts/api.ts and its siblings)
+   * fetches a relative /api path — same-origin by design, so nothing in
+   * application code has to know where the backend lives. In dev that
+   * origin is the Vite server itself, so without this it has nothing to
+   * forward those requests to. Only active when VITE_USE_MOCKS=false
+   * actually reaches for it; the mocked dev experience (the default) never
+   * touches this.
+   */
+  server: {
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:4000',
+        changeOrigin: true,
+      },
+    },
+  },
+
+  /**
    * Tests run through the app's own Vite config, which is the point of using
    * Vitest here rather than a standalone runner: `import.meta.env.DEV` is true,
    * the `@` alias resolves, and the dev mocks behave exactly as they do in the

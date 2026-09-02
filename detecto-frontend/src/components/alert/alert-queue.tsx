@@ -343,13 +343,6 @@ function Results({
 
                 <TableCell>
                   <AlertStatus status={alert.status} className="text-meta" />
-                  {/* Otherwise a decision that only exists in this browser
-                      reads exactly like one the whole team can see. */}
-                  {alert.decisionScope === 'local' && (
-                    <span className="mt-0.5 block whitespace-nowrap text-meta text-neutral-500">
-                      Local only
-                    </span>
-                  )}
                 </TableCell>
               </TableRow>
             ))}

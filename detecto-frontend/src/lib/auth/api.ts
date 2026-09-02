@@ -17,10 +17,26 @@ export type LoginResult =
 
 export type ResetResult = { ok: true } | { ok: false; code: 'unavailable' }
 
+export type RefreshResult = { ok: true; accessToken: string } | { ok: false }
+
 const DEFAULT_LOCKOUT_SECONDS = 900
 
 export function login(body: LoginRequest): Promise<LoginResult> {
   return USE_MOCKS ? mockLogin(body) : realLogin(body)
+}
+
+/**
+ * Silent refresh: exchanges the httpOnly refresh cookie for a new access
+ * token, no credentials involved. Called on app boot (a reload has nothing
+ * in memory) and by the fetch interceptor in `lib/auth/http.ts` on a 401
+ * from any other endpoint.
+ *
+ * Never surfaces *why* it failed (expired, revoked, missing cookie, network
+ * down) — every caller's response is the same either way: there is no
+ * session, fall back to whatever a signed-out visitor sees.
+ */
+export function refresh(): Promise<RefreshResult> {
+  return USE_MOCKS ? mockRefresh() : realRefresh()
 }
 
 export function requestPasswordReset(email: string): Promise<ResetResult> {
@@ -82,6 +98,61 @@ async function realLogin(body: LoginRequest): Promise<LoginResult> {
     return { ok: false, code: 'unavailable' }
   }
   return { ok: true, accessToken: payload.accessToken }
+}
+
+/**
+ * One refresh attempt. `'race'` is a third outcome, distinct from
+ * `{ ok: false }`, but it never leaves this file — see `realRefresh()`.
+ */
+async function attemptRealRefresh(): Promise<RefreshResult | 'race'> {
+  let response: Response
+  try {
+    response = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      // The only thing this request carries is the httpOnly cookie —
+      // nothing readable by this code decides whether it succeeds.
+      credentials: 'include',
+    })
+  } catch {
+    return { ok: false }
+  }
+
+  // The backend's way of saying "a sibling request for this account —
+  // another tab, or an overlapping page load — already rotated this exact
+  // cookie a moment ago, and the account has a live session right now
+  // because of it" (routes/auth.js's 'rotation_race'). Not a failed
+  // session: the sibling's own response already carries the valid
+  // replacement cookie. See `realRefresh()` for the retry this triggers.
+  if (response.status === 409) return 'race'
+
+  if (!response.ok) return { ok: false }
+
+  const data: unknown = await response.json().catch(() => null)
+  if (typeof data !== 'object' || data === null) return { ok: false }
+  const payload = data as Record<string, unknown>
+  if (typeof payload.accessToken !== 'string') return { ok: false }
+  return { ok: true, accessToken: payload.accessToken }
+}
+
+/**
+ * Retries exactly once on a benign rotation race, entirely internally —
+ * `refresh()`'s contract to every caller (`attemptRefresh` in
+ * `lib/auth/session.ts`, and indirectly the fetch interceptor there) stays
+ * "never surfaces why it failed." A short pause first, so the browser has
+ * a moment to have actually applied the sibling's Set-Cookie response
+ * before this presents whatever cookie is currently in the jar; without
+ * it, a retry fired before that lands could re-present the very cookie
+ * that just lost, and see the same race again. One retry, not a loop: if
+ * the second attempt is also a race, this gives up rather than spin —
+ * whatever a signed-out visitor sees is the honest state at that point.
+ */
+async function realRefresh(): Promise<RefreshResult> {
+  const first = await attemptRealRefresh()
+  if (first !== 'race') return first
+
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  const retried = await attemptRealRefresh()
+  return retried === 'race' ? { ok: false } : retried
 }
 
 async function realReset(email: string): Promise<ResetResult> {
@@ -168,6 +239,20 @@ async function mockLogin(body: LoginRequest): Promise<LoginResult> {
 async function mockReset(): Promise<ResetResult> {
   await new Promise((resolve) => setTimeout(resolve, 450))
   return { ok: true }
+}
+
+/**
+ * There is no mock backend and no cookie jar behind this dev transport —
+ * every mock's state is a plain JS module variable, which a reload wipes
+ * just as thoroughly as it wipes the access token in `auth-store.ts`. So
+ * unlike the real refresh cookie, a mock "session" simply doesn't survive a
+ * reload: this always fails, same as it would on a first, never-logged-in
+ * visit. Mock mode's login form still works exactly as before; only the
+ * hard-reload-stays-signed-in behavior needs the real backend to observe.
+ */
+async function mockRefresh(): Promise<RefreshResult> {
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  return { ok: false }
 }
 
 async function mockLogout(): Promise<void> {

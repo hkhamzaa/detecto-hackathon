@@ -1,0 +1,24 @@
+{
+  "name": "detecto-db",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "migrate": "node-pg-migrate",
+    "migrate:up": "node-pg-migrate up",
+    "migrate:down": "node-pg-migrate down",
+    "migrate:create": "node-pg-migrate create",
+    "seed": "node seed.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Postgres schema, migrations, and seed data for Detecto's backend",
+  "private": "true",
+  "dependencies": {
+    "argon2": "^0.45.1",
+    "dotenv": "^17.4.2",
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.23.0"
+  },
+  "type": "module"
+}

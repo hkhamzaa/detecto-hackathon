@@ -54,12 +54,6 @@ export type Alert = {
    * placeholder when it is absent.
    */
   frameImage?: string
-  /**
-   * Set when the decision on this alert was only ever written to this browser,
-   * because the pipeline that raised it has nowhere to record one. Never set by
-   * anything that reached a server — that is the entire distinction it draws.
-   */
-  decisionScope?: 'local'
 }
 
 export type AlertsResult =
@@ -168,10 +162,6 @@ export function parseAlert(value: unknown): Alert | null {
 
   const frameImage = imageData(a.frameImage)
   if (frameImage) alert.frameImage = frameImage
-
-  // `decisionScope` is deliberately not read off the wire. It means "this was
-  // never recorded anywhere", which is a claim only this browser can make about
-  // its own cache — a server saying it would be saying something incoherent.
 
   return alert
 }

@@ -1,25 +1,80 @@
 # Detecto — alert stream server
 
 A thin Socket.IO server that runs the Phase 1 inference script, turns its
-detection events into the shape the frontend's alert queue already expects, and
-pushes them to connected clients.
+detection events into the shape the frontend's alert queue already expects,
+pushes them to connected clients in real time, and durably saves each one
+through the Node API (`detecto-backend/api`) so it survives a page reload.
 
 It adds no intelligence of its own. Everything it emits was decided by
-`inference/live_infer.py`; this layer only filters, renames and forwards.
+`inference/live_infer.py`; this layer only filters, renames, forwards, and
+persists.
 
 ```
-live_infer.py ──JSONL on stdout──▶ server ──"alert:new"──▶ browser
-                                     │
-                                     ├─ drops every "Normal" window
-                                     └─ collapses a run of same-class windows
-                                        into one alert per incident
+                                     ┌─"alert:new"──▶ browser (real time)
+live_infer.py ──JSONL on stdout──▶ server
+                                     └─POST /api/alerts──▶ Node API ──▶ Postgres
+                                        (best-effort; never blocks the above)
 ```
+
+The filtering — dropping every `Normal` window, collapsing a run of
+same-class windows into one alert per incident (both described below) —
+happens exactly as before, upstream of both arrows. Persistence is additive:
+it never replaces or delays the socket emission.
 
 ## Scope
 
-Deliberately not here: authentication, persistence, multiple cameras, replay of
-missed alerts. One hardcoded feed, matching Phase 1. Alerts exist only in
-flight — a client that connects late has missed whatever came before it.
+Deliberately not here: user authentication of its own, multiple cameras,
+replay of missed alerts. One hardcoded feed, matching Phase 1. The live socket
+feed is still in-flight-only — a client that connects late has missed whatever
+came before it over the socket — but every alert now also exists in Postgres
+via the Node API, reachable through the ordinary `GET /api/alerts` a client
+that connected late (or reloaded) can call instead.
+
+## Persistence, and the internal API key
+
+Every alert this server emits is also `POST`ed to `detecto-backend/api`'s
+`POST /api/alerts`, authenticated with a shared secret — not a user's JWT,
+because there is no signed-in person behind a detection the model raised on
+its own. Both services read the same value from their own environment:
+
+| Here (`server/`) | There (`api/.env`) |
+| --- | --- |
+| `DETECTO_API_KEY` | `INTERNAL_API_KEY` |
+
+They must be byte-for-byte identical. Generate one with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+and set it in both places. This is a shared secret between two services
+running on the same machine, not a substitute for real service-to-service
+auth (mTLS, a rotating token, etc.) — acceptable because both processes are
+local and neither is exposed beyond `127.0.0.1` in this setup. If either
+service is ever deployed somewhere the other end of that connection isn't
+trusted by default, this needs to become something stronger before that
+happens.
+
+**`DETECTO_CAMERA_ID` must be a real camera's id, not a made-up string.**
+`alerts.camera_id` in the schema is a `uuid` foreign key to an actual row in
+`cameras` — the API looks the camera up to find out which organization the
+alert belongs to (see `api/src/routes/alerts.js`; the org is deliberately
+never taken from anything this server sends). `db/seed.js` seeds a
+"Demo camera 1" / "Demo feed" camera for exactly this purpose and prints its
+id when you run it:
+
+```bash
+cd detecto-backend/db && npm run seed
+# Demo camera id (for DETECTO_CAMERA_ID): <uuid>
+```
+
+Without a valid `DETECTO_CAMERA_ID`, the socket feed still works — the
+frontend still sees alerts in real time — but every persist attempt fails
+validation (`422 cameraId`) and is logged as a warning here. Persistence is
+best-effort by design (see `Pipeline._persist` in `app.py`): a database or
+network hiccup, or a misconfigured camera id, must never take the live feed
+down with it. Check `alertsPersisted` / `persistFailures` on `GET /health` if
+alerts seem to be arriving live but not surviving a reload.
 
 ## Setup
 
@@ -43,8 +98,15 @@ serves an empty stream.
 
 ## Run
 
+The Node API (`detecto-backend/api`) must already be running, migrated and
+seeded first — this server posts to it on every alert. `DETECTO_API_KEY` and
+`DETECTO_CAMERA_ID` are both required; see "Persistence, and the internal API
+key" above for where each comes from.
+
 ```bash
 cd detecto-backend
+DETECTO_API_KEY=<matches api's INTERNAL_API_KEY> \
+DETECTO_CAMERA_ID=<uuid db/seed.js printed> \
 python server/app.py
 ```
 
@@ -61,11 +123,13 @@ socket.on('alert:new', (alert) => { /* ... */ })
 Point it at a different clip:
 
 ```bash
-DETECTO_VIDEO=path/to/clip.mp4 python server/app.py
+DETECTO_VIDEO=path/to/clip.mp4 DETECTO_API_KEY=... DETECTO_CAMERA_ID=... python server/app.py
 ```
 
-`GET /health` reports whether inference is alive and how many windows have been
-seen, skipped, merged into open incidents, and emitted.
+`GET /health` reports whether inference is alive, how many windows have been
+seen, skipped, merged into open incidents, and emitted, and how many of those
+were persisted to Postgres vs. failed to persist
+(`alertsPersisted`/`persistFailures`).
 
 ### Watching the stream without the frontend
 
@@ -78,15 +142,19 @@ reads what actually crossed the wire, rather than trusting the server's own log.
 
 ## Configuration
 
-All environment variables, all optional.
+All environment variables, all optional **except `DETECTO_API_KEY`**, which
+the server refuses to start without.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DETECTO_VIDEO` | `Detecto_Demo_Package/sample_outputs/test_video.mp4` | Clip to run |
-| `DETECTO_CAMERA_ID` | `demo-camera-1` | Passed to `--camera-id`, echoed as `cameraId` |
+| `DETECTO_CAMERA_ID` | `demo-camera-1` | Passed to `--camera-id`, echoed as `cameraId`. **Must be a real camera's uuid for persistence to succeed** — see above; the literal string default is not one, and only the socket transport will work with it |
 | `DETECTO_CAMERA_NAME` | `Demo camera 1` | `cameraName` — Phase 1 has no name to give |
 | `DETECTO_ZONE` | `Demo feed` | `zone` — likewise |
 | `DETECTO_MODEL` | `r3d18-scvd 0.1` | `model`, the build an alert is traced back to |
+| `DETECTO_API_URL` | `http://127.0.0.1:4000` | Where `detecto-backend/api` listens |
+| `DETECTO_API_KEY` | *(none — required)* | Must equal `INTERNAL_API_KEY` in `api/.env` exactly |
+| `DETECTO_API_TIMEOUT_SECONDS` | `5` | Per-request timeout for the persist POST |
 | `DETECTO_HOST` / `DETECTO_PORT` | `127.0.0.1` / `8000` | Bind address |
 | `DETECTO_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated; Vite's dev server |
 | `DETECTO_REALTIME` | `1` | `0` disables wall-clock pacing (`--no-realtime`) |
@@ -109,7 +177,7 @@ Event name: **`alert:new`**. Payload is one `Alert`, matching the type in
 ```json
 {
   "id": "ALR-0001",
-  "cameraId": "demo-camera-1",
+  "cameraId": "13d32327-a694-4ef8-8c00-3ebc951fce68",
   "cameraName": "Demo camera 1",
   "zone": "Demo feed",
   "kind": "weapon",
@@ -129,8 +197,8 @@ Event name: **`alert:new`**. Payload is one `Alert`, matching the type in
 
 | Phase 1 | `Alert` | |
 | --- | --- | --- |
-| — | `id` | `ALR-0001`, `ALR-0002`, … Per-process; nothing is persisted |
-| `camera_id` | `cameraId` | Straight through |
+| — | `id` | `ALR-0001`, `ALR-0002`, … Generated per-process (resets on restart), but now persisted through the API — see "Persistence" above for what a restart's colliding ids mean |
+| `camera_id` | `cameraId` | Straight through — must be a real camera's uuid; see `DETECTO_CAMERA_ID` above |
 | — | `cameraName`, `zone` | From config. Phase 1 knows an id, not a place |
 | `classification` | `kind` | `Violence` → `violence`, `Weaponized` → `weapon` |
 | — | `subtype` | Always `null` — see below |

@@ -10,6 +10,10 @@ detecto-frontend/dist/
 # Frontend dependencies
 detecto-frontend/node_modules/
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Env files
 .env
 .env.local

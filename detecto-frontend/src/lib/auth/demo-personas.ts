@@ -12,6 +12,7 @@ export type DemoPersona = {
   label: string
   blurb: string
   email: string
+  recommended?: boolean
 }
 
 export const DEMO_PERSONAS: DemoPersona[] = [
@@ -20,6 +21,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     label: 'Org admin',
     blurb: 'Northgate. Cameras, people, alerts, billing.',
     email: 'admin@northgate.example',
+    recommended: true,
   },
   {
     id: 'super',

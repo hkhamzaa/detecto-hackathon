@@ -230,10 +230,21 @@ export function CredentialsStep({
           {DEMO_PERSONAS.map((persona) => (
             <li
               key={persona.id}
-              className="flex items-center gap-3 rounded-md border border-neutral-200 px-3 py-2.5"
+              className={
+                persona.recommended
+                  ? 'flex items-center gap-3 rounded-md border-2 border-signal-500 bg-signal-50/40 px-3 py-2.5'
+                  : 'flex items-center gap-3 rounded-md border border-neutral-200 px-3 py-2.5'
+              }
             >
               <div className="min-w-0 flex-1">
-                <p className="text-meta font-medium text-ink">{persona.label}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-meta font-medium text-ink">{persona.label}</p>
+                  {persona.recommended && (
+                    <span className="rounded-full bg-signal-500 px-2 py-0.5 text-[0.625rem] font-medium uppercase tracking-wide text-white">
+                      Recommended
+                    </span>
+                  )}
+                </div>
                 <p className="font-mono text-meta text-neutral-700">{persona.email}</p>
                 <p className="text-meta text-neutral-600">{persona.blurb}</p>
               </div>

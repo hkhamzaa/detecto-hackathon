@@ -204,6 +204,10 @@ async function resolvePlanId(client, accountType, requestedPlanId) {
 }
 
 authRouter.post('/signup', signupLimiter, async (req, res) => {
+  if (!config.signupEnabled) {
+    return res.status(403).json({ error: 'signup_disabled' });
+  }
+
   const body = req.body ?? {};
   const errors = signupErrors(body);
   if (Object.keys(errors).length > 0) {

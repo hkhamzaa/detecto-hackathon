@@ -34,6 +34,14 @@ export const config = {
   // to 404 that route without deleting it.
   demoMode: process.env.DEMO_MODE !== 'false',
 
+  // Public GitHub + a live demo: leave signup on for local/dev, turn it off
+  // on the VM with SIGNUP_ENABLED=false so strangers cannot create orgs.
+  signupEnabled: process.env.SIGNUP_ENABLED !== 'false',
+
+  // Bind address. Unset = all interfaces (local Vite proxy). On the VM set
+  // LISTEN_HOST=127.0.0.1 so only nginx on :8001 can reach the API.
+  listenHost: process.env.LISTEN_HOST || null,
+
   // detecto-backend/server (the process that owns POST /pipelines). Same
   // machine as this API in the local demo; the uploaded file's absolute path
   // is handed across as `video` on that call.

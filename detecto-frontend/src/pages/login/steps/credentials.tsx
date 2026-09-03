@@ -6,6 +6,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { login } from '@/lib/auth/api'
+import { DEMO_PERSONAS, demoPassword, type DemoPersona } from '@/lib/auth/demo-personas'
 import { landingPathFor } from '@/lib/auth/redirect'
 import { focusFirstInvalid, isEmail, type Errors } from '@/lib/forms'
 import { useAuthStore } from '@/store/auth-store'
@@ -49,7 +50,7 @@ export function CredentialsStep({
 
   const [errors, setErrors] = useState<Errors<'email' | 'password'>>({})
   const [formError, setFormError] = useState<FormError | null>(null)
-  const [pending, setPending] = useState(false)
+  const [pending, setPending] = useState<'form' | string | null>(null)
 
   const formRef = useRef<HTMLFormElement>(null)
   const alertRef = useRef<HTMLDivElement>(null)
@@ -73,10 +74,27 @@ export function CredentialsStep({
       return
     }
 
-    setPending(true)
+    setPending('form')
     const result = await login({ email: email.trim(), password, remember })
-    setPending(false)
+    setPending(null)
+    applyLoginResult(result)
+  }
 
+  const onDemoLogin = async (persona: DemoPersona) => {
+    if (pending) return
+    setFormError(null)
+    setErrors({})
+    setPending(persona.id)
+    const result = await login({
+      email: persona.email,
+      password: demoPassword(),
+      remember: false,
+    })
+    setPending(null)
+    applyLoginResult(result)
+  }
+
+  const applyLoginResult = (result: Awaited<ReturnType<typeof login>>) => {
     if (result.ok) {
       const claims = signIn(result.accessToken)
       navigate(landingPathFor(claims), { replace: true })
@@ -104,8 +122,6 @@ export function CredentialsStep({
     }
 
     setFormError({ kind: 'generic' })
-    // Land on the password — the field most likely to need changing — rather
-    // than on a message that already announced itself.
     requestAnimationFrame(() => {
       formRef.current
         ?.querySelector<HTMLInputElement>('input[type="password"]')
@@ -114,7 +130,7 @@ export function CredentialsStep({
   }
 
   return (
-    <form ref={formRef} onSubmit={onSubmit} noValidate aria-busy={pending}>
+    <form ref={formRef} onSubmit={onSubmit} noValidate aria-busy={Boolean(pending)}>
       <h1 className="font-display text-display-md font-medium text-ink">
         Sign in
       </h1>
@@ -196,10 +212,39 @@ export function CredentialsStep({
         type="submit"
         size="lg"
         className="mt-8 w-full"
-        disabled={pending}
+        disabled={Boolean(pending)}
       >
-        {pending ? 'Signing in…' : 'Sign in'}
+        {pending === 'form' ? 'Signing in…' : 'Sign in'}
       </Button>
+
+      <div className="mt-10 border-t border-neutral-200 pt-6">
+        <p className="text-meta font-medium text-ink">Demo roles</p>
+        <p className="mt-1 text-meta text-neutral-600">
+          Hackathon shortcut. One click signs you in as that person.
+        </p>
+        <ul className="mt-4 grid gap-2">
+          {DEMO_PERSONAS.map((persona) => (
+            <li
+              key={persona.id}
+              className="flex items-center gap-3 rounded-md border border-neutral-200 px-3 py-2.5"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-meta font-medium text-ink">{persona.label}</p>
+                <p className="text-meta text-neutral-600">{persona.blurb}</p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={Boolean(pending)}
+                onClick={() => void onDemoLogin(persona)}
+              >
+                {pending === persona.id ? 'Signing in…' : 'Log in'}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </div>
     </form>
   )
 }

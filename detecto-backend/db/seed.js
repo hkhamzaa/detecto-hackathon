@@ -118,6 +118,8 @@ async function seedTestOrg(client) {
     [orgId, roleId, TEST_USER_EMAIL, passwordHash],
   );
 
+  await seedDemoPeople(client, orgId, passwordHash);
+
   // `online: false`/no address for all three: nothing here is a real network
   // device, and a seed row claiming otherwise is exactly the honesty gap the
   // schema itself no longer papers over (see the Step 1 report — `online`
@@ -182,6 +184,78 @@ async function seedTestOrg(client) {
   await seedSubscription(client, orgId);
 
   return { demoCameraId: demoCamera.rows[0].id, demoBoxId: boxRow.id };
+}
+
+/**
+ * Extra logins for the hackathon sign-in page (one button per role). Same
+ * password as TEST_USER_PASSWORD. Safe to re-run.
+ */
+async function seedDemoPeople(client, orgId, passwordHash) {
+  async function roleIdFor(name, permissions) {
+    const created = await client.query(
+      `INSERT INTO roles (org_id, name, permissions, zones, is_default)
+       SELECT $1, $2, $3, NULL, false
+       WHERE NOT EXISTS (SELECT 1 FROM roles WHERE org_id = $1 AND name = $2)
+       RETURNING id`,
+      [orgId, name, permissions],
+    );
+    return created.rows[0]?.id ?? (
+      await client.query(
+        `SELECT id FROM roles WHERE org_id = $1 AND name = $2 LIMIT 1`,
+        [orgId, name],
+      )
+    ).rows[0].id;
+  }
+
+  const operatorRoleId = await roleIdFor('Operator', [
+    'alerts:view', 'alerts:confirm', 'cameras:view',
+  ]);
+  const viewerRoleId = await roleIdFor('Viewer', ['cameras:view']);
+
+  const people = [
+    {
+      name: 'Samir Platt',
+      email: 'super@northgate.example',
+      orgId: null,
+      roleId: null,
+      superAdmin: true,
+    },
+    {
+      name: 'Rhea Mehta',
+      email: 'member@northgate.example',
+      orgId,
+      roleId: operatorRoleId,
+      superAdmin: false,
+    },
+    {
+      name: 'Tomas Bergstrom',
+      email: 'viewer@northgate.example',
+      orgId,
+      roleId: viewerRoleId,
+      superAdmin: false,
+    },
+    {
+      name: 'Joan Whitfield',
+      email: 'nobody@northgate.example',
+      orgId,
+      roleId: null,
+      superAdmin: false,
+    },
+  ];
+
+  for (const person of people) {
+    await client.query(
+      `INSERT INTO users (org_id, name, email, password_hash, role_id, status, is_super_admin)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6)
+       ON CONFLICT (lower(email)) DO UPDATE SET
+         password_hash = excluded.password_hash,
+         org_id = excluded.org_id,
+         role_id = excluded.role_id,
+         is_super_admin = excluded.is_super_admin,
+         status = 'active'`,
+      [person.orgId, person.name, person.email, passwordHash, person.roleId, person.superAdmin],
+    );
+  }
 }
 
 /**

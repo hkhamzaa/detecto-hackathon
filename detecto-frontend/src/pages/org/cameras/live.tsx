@@ -99,14 +99,29 @@ export default function OrgCameraLivePage() {
         }
       />
 
-      <p className="mb-6 max-w-2xl text-meta text-neutral-500">
-        {ticks.length === 0
-          ? connected
-            ? 'detecto-hackathon-final is analysing this file. The bar will show that model’s score for each moment — not a guess.'
-            : 'Waiting to reach the detection service. Scores appear once the model has analysed this file.'
-          : complete
-            ? `detecto-hackathon-final has analysed this file (${ticks.length} clips). Play the video — the bar is that model’s score for the current time.`
-            : `detecto-hackathon-final is still analysing (${ticks.length} clips so far). Play from the start; later moments fill in as the model finishes them.`}
+      <p className="mb-6 max-w-2xl text-meta text-ink">
+        {ticks.length === 0 ? (
+          connected ? (
+            <>
+              <span className="font-medium text-signal-600">
+                AI MODEL is currently processing the CCTV footage.
+              </span>{' '}
+              Please wait a while, then you may play the video.
+            </>
+          ) : (
+            'Waiting to reach the detection service. Scores appear once the model has analysed this file.'
+          )
+        ) : complete ? (
+          `detecto-hackathon-final has analysed this file (${ticks.length} clips). Play the video — the bar is that model’s score for the current time.`
+        ) : (
+          <>
+            <span className="font-medium text-signal-600">
+              AI MODEL is currently processing the CCTV footage ({ticks.length}{' '}
+              clips so far).
+            </span>{' '}
+            Please wait a while, then you may play the video.
+          </>
+        )}
       </p>
 
       {canPlay ? (

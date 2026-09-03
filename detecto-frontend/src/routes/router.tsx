@@ -95,6 +95,7 @@ export const router = createBrowserRouter([
       guarded('/org/overview', pages.OrgOverview),
       guarded('/org/cameras', pages.OrgCameras),
       guarded('/org/cameras/connect', pages.OrgCamerasConnect, '/org/cameras'),
+      guarded('/org/cameras/:id/live', pages.OrgCameraLive, '/org/cameras'),
       guarded('/org/modules', pages.OrgModules),
       guarded('/org/alerts', pages.OrgAlerts),
       guarded('/org/alerts/:id', pages.OrgAlertDetail, '/org/alerts'),

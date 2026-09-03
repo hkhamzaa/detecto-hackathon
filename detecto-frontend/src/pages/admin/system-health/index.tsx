@@ -12,6 +12,7 @@ import { ApiHealthSection } from '@/pages/admin/system-health/api-health'
 import { CostSection } from '@/pages/admin/system-health/cost'
 import { FleetSection } from '@/pages/admin/system-health/fleet'
 import { QueueSection } from '@/pages/admin/system-health/queues'
+import { DEMO_MODE } from '@/lib/config/demo'
 import { useAuthStore } from '@/store/auth-store'
 
 /**
@@ -75,7 +76,7 @@ export default function AdminSystemHealthPage() {
         <>
           <Verdict health={health.data} now={now} />
 
-          <FleetSection fleet={health.data.fleet} now={now} />
+          {!DEMO_MODE && <FleetSection fleet={health.data.fleet} now={now} />}
 
           <ApiHealthSection
             api={health.data.api}

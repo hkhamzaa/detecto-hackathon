@@ -77,12 +77,14 @@ describe('permissions', () => {
 })
 
 describe('what the page says about itself', () => {
-  it('leads with the fact that this is not the record', () => {
+  it('leads with the fact that the log is stored', () => {
     signIn(AUDITOR)
     const out = open().text()
 
-    expect(out).toContain('This is a view of a record that does not exist yet')
-    expect(out).toContain('Detecto has no audit-event service')
+    expect(out).toContain('This log is stored')
+    expect(out).toContain('written when the action happened')
+    expect(out).toContain('Confirming records that a person took responsibility')
+    expect(out).toContain('Detecto has not contacted anyone')
   })
 
   it('warns that a missing entry proves nothing', () => {
@@ -90,15 +92,18 @@ describe('what the page says about itself', () => {
     signIn(AUDITOR)
     const out = open().text()
 
-    expect(out).toContain('can only ever contain what this browser was told about')
+    expect(out).toContain('This page is a view of that record')
     expect(out).toContain('do not treat a missing entry as evidence that nothing happened')
   })
 
-  it('does not repeat the append-only promise it cannot keep', () => {
-    // The placeholder this page replaced promised an append-only log nobody
-    // can edit. True of what is being built; not true of anything on screen.
+  it('does not claim the feed is assembled or unstored', () => {
     signIn(AUDITOR)
-    expect(open().text()).not.toContain('append-only')
+    const out = open().text()
+
+    expect(out).not.toContain('assembled for this page')
+    expect(out).not.toContain('nothing below is stored')
+    expect(out).not.toContain('does not exist yet')
+    expect(out).not.toContain('No audit-event service')
   })
 })
 
@@ -276,16 +281,6 @@ describe('export', () => {
 })
 
 describe('the gaps this page is honest about', () => {
-  it('says a real log has to be written server-side', () => {
-    signIn(AUDITOR)
-    const out = open().text()
-
-    expect(out).toContain('No audit-event service, so nothing is kept')
-    expect(out).toContain(
-      'written on the server by the same transaction that performs the action',
-    )
-  })
-
   it('explains why an alert decision has no role on it', () => {
     signIn(AUDITOR)
     expect(open().text()).toContain('it was never meant to be an audit event')

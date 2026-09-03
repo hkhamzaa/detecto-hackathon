@@ -1,3 +1,4 @@
+import { parseTick, type DetectionTick } from '@/lib/cameras/overlay'
 import { USE_MOCKS } from '@/lib/config/mocks'
 import { useAuthStore } from '@/store/auth-store'
 
@@ -124,6 +125,20 @@ export function addCameras(cameras: NewCamera[]): Promise<AddResult> {
   return USE_MOCKS ? mockAdd(cameras) : realAdd(cameras)
 }
 
+export type UploadDemoResult =
+  | { ok: true; camera: Camera; pipelineStarted: boolean }
+  | { ok: false; code: 'too_large' }
+  | { ok: false; code: 'unavailable' }
+  | { ok: false; code: 'validation_failed'; message: string }
+
+export function uploadDemoVideo(input: {
+  file: File
+  name?: string
+  zone?: string
+}): Promise<UploadDemoResult> {
+  return USE_MOCKS ? mockUpload(input) : realUpload(input)
+}
+
 /** Moves a box-reported camera from `'pending'` to `'approved'` — the one
  * thing a person does to put it into use. There is no reverse of this: a
  * camera already approved cannot be sent back to `'pending'` through this
@@ -134,6 +149,30 @@ export function approveCamera(id: string): Promise<ApproveResult> {
 
 export function listCameras(): Promise<ListResult> {
   return USE_MOCKS ? mockList() : realList()
+}
+
+export type GetCameraResult =
+  | { ok: true; camera: Camera }
+  | { ok: false; code: 'not_found' | 'unavailable' }
+
+export function getCamera(id: string): Promise<GetCameraResult> {
+  return USE_MOCKS ? mockGet(id) : realGet(id)
+}
+
+export type CameraDetectionsResult =
+  | { ok: true; complete: boolean; ticks: DetectionTick[] }
+  | { ok: false; code: 'unavailable' }
+
+/** Model timeline for one uploaded file. Empty until inference has scored a window. */
+export function getCameraDetections(id: string): Promise<CameraDetectionsResult> {
+  return USE_MOCKS
+    ? Promise.resolve({ ok: true as const, complete: true, ticks: [] })
+    : realDetections(id)
+}
+
+export function cameraVideoUrl(id: string, accessToken: string) {
+  const params = new URLSearchParams({ access_token: accessToken })
+  return `/api/cameras/${encodeURIComponent(id)}/video?${params}`
 }
 
 /* -------------------------------------------------------------------------- */
@@ -292,6 +331,85 @@ async function realList(): Promise<ListResult> {
   return { ok: true, cameras: collect(payload.cameras, toCamera) }
 }
 
+async function realGet(id: string): Promise<GetCameraResult> {
+  let response: Response
+  try {
+    response = await fetch(`/api/cameras/${encodeURIComponent(id)}`, { headers: authHeaders() })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+  if (response.status === 404) return { ok: false, code: 'not_found' }
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+  const camera = toCamera(await readObject(response))
+  if (!camera) return { ok: false, code: 'unavailable' }
+  return { ok: true, camera }
+}
+
+async function realDetections(id: string): Promise<CameraDetectionsResult> {
+  let response: Response
+  try {
+    response = await fetch(`/api/cameras/${encodeURIComponent(id)}/detections`, {
+      headers: authHeaders(),
+    })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+  const payload = await readObject(response)
+  if (!payload) return { ok: false, code: 'unavailable' }
+  const ticks = Array.isArray(payload.ticks)
+    ? payload.ticks.map((row) => parseTick(row, id)).filter((tick): tick is DetectionTick => tick !== null)
+    : []
+  return { ok: true, complete: payload.complete === true, ticks }
+}
+
+async function realUpload(input: {
+  file: File
+  name?: string
+  zone?: string
+}): Promise<UploadDemoResult> {
+  const body = new FormData()
+  body.append('video', input.file)
+  if (input.name?.trim()) body.append('name', input.name.trim())
+  if (input.zone?.trim()) body.append('zone', input.zone.trim())
+
+  let response: Response
+  try {
+    response = await fetch('/api/cameras/upload', {
+      method: 'POST',
+      headers: authHeaders(),
+      body,
+    })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+
+  if (response.status === 413) return { ok: false, code: 'too_large' }
+
+  const payload = await readObject(response)
+  const camera = payload ? toCamera(payload.camera) : null
+
+  if (response.status === 201 && camera) {
+    return { ok: true, camera, pipelineStarted: true }
+  }
+  if (response.status === 502 && camera) {
+    return { ok: true, camera, pipelineStarted: false }
+  }
+  if (response.status === 422) {
+    const errors = payload?.errors
+    const videoError =
+      errors && typeof errors === 'object' && !Array.isArray(errors)
+        ? str((errors as Record<string, unknown>).video)
+        : null
+    return {
+      ok: false,
+      code: 'validation_failed',
+      message: videoError ?? 'The upload was refused.',
+    }
+  }
+  return { ok: false, code: 'unavailable' }
+}
+
 async function realApprove(id: string): Promise<ApproveResult> {
   let response: Response
   try {
@@ -432,6 +550,33 @@ async function mockAdd(cameras: NewCamera[]): Promise<AddResult> {
 async function mockList(): Promise<ListResult> {
   await wait(MOCK_DELAY.list)
   return { ok: true, cameras: mockCameras }
+}
+
+async function mockGet(id: string): Promise<GetCameraResult> {
+  await wait(MOCK_DELAY.list)
+  const camera = mockCameras.find((row) => row.id === id)
+  if (!camera) return { ok: false, code: 'not_found' }
+  return { ok: true, camera }
+}
+
+async function mockUpload(input: {
+  file: File
+  name?: string
+  zone?: string
+}): Promise<UploadDemoResult> {
+  await wait(MOCK_DELAY.add)
+  mockCounter += 1
+  const camera: Camera = {
+    id: `cam_${String(mockCounter).padStart(3, '0')}`,
+    name: input.name?.trim() || input.file.name.replace(/\.[^.]+$/, '') || 'Demo camera',
+    zone: input.zone?.trim() || 'Demo feed',
+    online: true,
+    lastSeen: new Date().toISOString(),
+    reviewStatus: 'approved',
+    sourceType: 'file',
+  }
+  mockCameras = [...mockCameras, camera]
+  return { ok: true, camera, pipelineStarted: false }
 }
 
 async function mockApprove(id: string): Promise<ApproveResult> {

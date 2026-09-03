@@ -1,4 +1,8 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 function required(name) {
   const value = process.env[name];
@@ -14,14 +18,29 @@ export const config = {
   jwtSecret: required('JWT_SECRET'),
   frontendOrigin,
 
-  // Shared secret for service-to-service calls — today, only
-  // detecto-backend/server (the Python Socket.IO pipeline) posting new
-  // alerts. Not a user credential and never issued as one: it authenticates
+  // Shared secret for service-to-service calls — today, detecto-backend/server
+  // (the Python Socket.IO pipeline) posting new alerts, and this API calling
+  // that server's POST /pipelines to start inference on an uploaded file.
+  // Not a user credential and never issued as one: it authenticates
   // "this request came from a trusted local service", not a person, so it
   // carries no org/permission claims of its own — every route gated by it
   // must derive its own org scope from the request body (e.g. by looking up
   // the camera), never accept one directly. See src/routes/alerts.js.
   internalApiKey: required('INTERNAL_API_KEY'),
+
+  // Hackathon demo copy: when on (the default here), POST /api/cameras/upload
+  // accepts a video file, creates a real `source_type: 'file'` camera, and
+  // asks the Python server to launch a pipeline against it. Set DEMO_MODE=false
+  // to 404 that route without deleting it.
+  demoMode: process.env.DEMO_MODE !== 'false',
+
+  // detecto-backend/server (the process that owns POST /pipelines). Same
+  // machine as this API in the local demo; the uploaded file's absolute path
+  // is handed across as `video` on that call.
+  pipelineUrl: (process.env.PIPELINE_URL ?? 'http://127.0.0.1:8000').replace(/\/$/, ''),
+
+  uploadDir: path.resolve(process.env.DEMO_UPLOAD_DIR ?? path.join(here, '../uploads')),
+  maxUploadBytes: Number(process.env.DEMO_MAX_UPLOAD_BYTES ?? 250 * 1024 * 1024),
 
   // Access-token (JWT) lifetime. Unaffected by the refresh flow below — the
   // JWT stays exactly as short-lived as it already was; "remember me" only

@@ -1,0 +1,29 @@
+{
+  "generated": "2026-09-03T05:12:52.225899",
+  "architecture": "Multi-head R3D-18 (shared backbone, independent sigmoid heads)",
+  "dataset": "SCVD (Smart-City CCTV Violence Detection) \u2014 481 clips",
+  "split": {
+    "train": 384,
+    "val": 97,
+    "method": "pinned, stratified, leakage-verified"
+  },
+  "violence_head": {
+    "auc": 0.999,
+    "precision": 1.0,
+    "recall": 0.96,
+    "f1": 0.98
+  },
+  "weapon_head": {
+    "auc": 0.911,
+    "precision": 0.7,
+    "recall": 0.84,
+    "f1": 0.76
+  },
+  "head_independence_correlation_on_disagreement": 0.1369,
+  "known_findings": [
+    "SCVD clip duration alone predicts class with 81.7% accuracy (undocumented confound, corrected via fixed-frame sampling)",
+    "Hard-rule weapon+violence fusion cascades DEGRADE accuracy (tested 3x with different weapon detectors) \u2014 motivated multi-head redesign",
+    "Weapon head performance (0.911 AUC) derives from learned contextual/motion features, not object localization \u2014 a separate YOLOv8 detector is used for visual bounding-box overlay only, not for the alert decision"
+  ],
+  "deployment_principle": "All model outputs require human verification before any alert is actioned"
+}

@@ -2,22 +2,31 @@
 """Run the Detecto models over a video file and emit structured detection events.
 
 This is a data-producing script, not a demo GUI. It reads a video sequentially
-(simulating a live camera feed), classifies each sliding window with the R3D-18
-violence classifier, and writes one JSON object per window to stdout as JSONL.
+(simulating a live camera feed), classifies each sliding window with the
+locked-in multi-head R3D-18 (`detecto-hackathon-final`), and writes one JSON
+object per window to stdout as JSONL.
 
-Design rules carried over from Detecto_Demo_Package/README.md:
+The classifier is two independent sigmoid heads on a shared R3D-18 backbone —
+a violence score and a weapon score, each in [0, 1], with no 3-class softmax
+and no hard-rule fusion. A YOLOv8 weapon *localizer* still runs as visual
+metadata only and MUST NOT influence either score.
 
-  * The violence classifier uses FIXED 12-frame sampling per window. The frame
-    count is deliberately independent of window duration so the model cannot
-    exploit the SCVD clip-duration confound (clip length alone predicts class
-    with 81.7% accuracy). Do not make the sample count depend on window length.
+Design rules:
 
-  * The weapon detector is INFORMATIONAL ONLY. It fires on ~81% of clips
-    including most no-weapon Normal clips, and naive fusion (auto-upgrading
-    Violence -> Weaponized on a detection) measurably hurt accuracy
-    (80% -> 76%, Violence F1 0.65 -> 0.24). Weapon fields are therefore emitted
-    as separate, explicitly unverified metadata and MUST NOT influence
-    `classification` or `confidence`.
+    * Overlay / live path for the locked-in multi-head model uses 12
+      *consecutive* frames (stride 4) — the Colab live recipe. A 2.0s
+      linspace window mixes later incident frames into an empty hallway
+      and the overlay then prints that clip's score on the wrong picture.
+      Spatial sample count is still exactly 12; never pad a short buffer.
+      The old 3-class path still linspace-samples a 2.0s window.
+
+    * Spatial preprocessing MUST match training: short side to 128, centre-crop
+      112x112, Kinetics-400 mean/std. Stretching to a fixed WxH is the
+      aspect-ratio bug this project already paid for once.
+
+    * The YOLO localizer is INFORMATIONAL ONLY. Hard-rule fusion of a box
+      detector into the class decision measurably hurt accuracy; the two
+      classifier heads are independent for the same reason.
 
 stdout carries only JSONL events. All diagnostics go to stderr.
 """
@@ -33,34 +42,36 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, NamedTuple, Sequence
 
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 from torchvision.models.video import r3d_18
 
 # --------------------------------------------------------------------------
 # Model constants
 # --------------------------------------------------------------------------
 
-# Index -> label mapping for the classifier head.
-#
-# WARNING: the checkpoint is a bare state_dict and stores NO class mapping, so
-# this order cannot be verified from the weights themselves. It follows the
-# order documented in Detecto_Demo_Package/README.md ("Normal / Violence /
-# Weaponized"), which is also the alphabetical directory order an
-# ImageFolder-style loader produces for SCVD. If the training script used a
-# different order, correct this list -- nothing else needs to change.
+# Labels the existing alert pipeline still understands. They are NOT a softmax
+# class order: the locked-in model has two independent binary heads, and these
+# strings are derived from those scores (see `heads_to_classification`).
 VIOLENCE_CLASSES: tuple[str, ...] = ("Normal", "Violence", "Weaponized")
 
 # The class that is the absence of an alert. Named rather than indexed so the
 # meaning survives if the order above is ever corrected.
 NORMAL_CLASS = "Normal"
 
+# Colab / training threshold on each independent sigmoid head.
+HEAD_THRESHOLD = 0.5
+
 # Fixed temporal sample count. See module docstring -- this is a modelling
 # decision, not a tuning knob.
 NUM_SAMPLED_FRAMES = 12
+# Live overlay for the multi-head checkpoint: 12 consecutive frames, hop 4.
+# ~0.4s at 30fps — local to the picture on screen, not a 2s mash-up.
+MULTIHEAD_STRIDE_FRAMES = 4
 
 # Kinetics-400 preprocessing for torchvision's r3d_18. The backbone was
 # Kinetics-pretrained, so these are the statistics the features expect.
@@ -80,17 +91,42 @@ WEAPON_NOTE = "unverified"
 # Model loading
 # --------------------------------------------------------------------------
 
+class MultiHeadR3D18(nn.Module):
+    """Shared R3D-18 backbone, two independent 1-logit heads.
+
+    Matches Detecto_Hackathon_Final exactly: Linear(512, 128) -> ReLU ->
+    Dropout(0.3) -> Linear(128, 1) per head. Forward returns
+    (violence_logit, weapon_logit), each squeezed to shape (B,). Apply
+    sigmoid for probabilities; do not softmax across heads.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        backbone = r3d_18(weights=None)
+        backbone.fc = nn.Identity()
+        self.backbone = backbone
+        self.violence_head = nn.Sequential(
+            nn.Linear(512, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 1)
+        )
+        self.weapon_head = nn.Sequential(
+            nn.Linear(512, 128), nn.ReLU(), nn.Dropout(0.3), nn.Linear(128, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        features = self.backbone(x)
+        return (
+            self.violence_head(features).squeeze(-1),
+            self.weapon_head(features).squeeze(-1),
+        )
+
+
 def _strip_prefix(state: dict[str, Any], prefix: str) -> dict[str, Any]:
     if all(k.startswith(prefix) for k in state):
         return {k[len(prefix):]: v for k, v in state.items()}
     return state
 
 
-def load_violence_model(weights: Path, device: torch.device) -> torch.nn.Module:
-    """Build r3d_18 with a 3-class head and load the fine-tuned weights."""
-    checkpoint = torch.load(weights, map_location="cpu", weights_only=True)
-
-    # The shipped file is a bare state_dict, but tolerate common wrappers.
+def _unwrap_state(checkpoint: Any, weights: Path) -> dict[str, Any]:
     if isinstance(checkpoint, dict):
         for key in ("state_dict", "model_state_dict", "model"):
             inner = checkpoint.get(key)
@@ -99,8 +135,42 @@ def load_violence_model(weights: Path, device: torch.device) -> torch.nn.Module:
                 break
     if not isinstance(checkpoint, dict):
         raise TypeError(f"{weights} did not contain a state_dict")
+    return _strip_prefix(dict(checkpoint), "module.")
 
-    state = _strip_prefix(dict(checkpoint), "module.")
+
+def load_multihead_model(weights: Path, device: torch.device) -> MultiHeadR3D18:
+    """Load detecto-hackathon-final (two independent sigmoid heads)."""
+    checkpoint = torch.load(weights, map_location="cpu", weights_only=True)
+    state = _unwrap_state(checkpoint, weights)
+
+    if "violence_head.0.weight" not in state or "weapon_head.0.weight" not in state:
+        raise KeyError(
+            f"{weights} is not a multi-head checkpoint (missing violence_head / "
+            "weapon_head). The old 3-class r3d18 lives in Detecto_Demo_Package."
+        )
+    v_out = state["violence_head.3.weight"]
+    w_out = state["weapon_head.3.weight"]
+    if tuple(v_out.shape) != (1, 128) or tuple(w_out.shape) != (1, 128):
+        raise ValueError(
+            f"{weights} head output shapes are violence={tuple(v_out.shape)} "
+            f"weapon={tuple(w_out.shape)}; expected (1, 128) each (one logit "
+            "per head, sigmoid — not a 3-class softmax)."
+        )
+
+    model = MultiHeadR3D18()
+    model.load_state_dict(state, strict=True)
+    model.eval().to(device)
+    return model
+
+
+def load_violence_model(weights: Path, device: torch.device) -> torch.nn.Module:
+    """Build r3d_18 with a 3-class head and load the previous fine-tuned weights.
+
+    Kept so pointing `--violence-model` at the old Detecto_Demo_Package
+    checkpoint still works. Default load path is the multi-head model.
+    """
+    checkpoint = torch.load(weights, map_location="cpu", weights_only=True)
+    state = _unwrap_state(checkpoint, weights)
 
     fc_weight = state.get("fc.weight")
     if fc_weight is None:
@@ -117,6 +187,17 @@ def load_violence_model(weights: Path, device: torch.device) -> torch.nn.Module:
     model.load_state_dict(state, strict=True)
     model.eval().to(device)
     return model
+
+
+def load_classifier(weights: Path, device: torch.device) -> torch.nn.Module:
+    """Pick the architecture from the checkpoint keys, not from the filename."""
+    checkpoint = torch.load(weights, map_location="cpu", weights_only=True)
+    state = _unwrap_state(checkpoint, weights)
+    if "violence_head.0.weight" in state:
+        model = MultiHeadR3D18()
+        model.load_state_dict(state, strict=True)
+        return model.eval().to(device)
+    return load_violence_model(weights, device)
 
 
 def load_weapon_model(weights: Path, device: torch.device):
@@ -151,10 +232,20 @@ def sample_fixed_frames(window: Sequence[np.ndarray], count: int) -> list[np.nda
 
 
 def preprocess_window(
-    window: Sequence[np.ndarray], device: torch.device
+    window: Sequence[np.ndarray],
+    device: torch.device,
+    *,
+    consecutive: bool = False,
 ) -> torch.Tensor:
     """BGR frames -> normalized (1, C, T, H, W) tensor for r3d_18."""
-    frames = sample_fixed_frames(window, NUM_SAMPLED_FRAMES)
+    if consecutive:
+        if len(window) < NUM_SAMPLED_FRAMES:
+            raise ValueError(
+                f"need {NUM_SAMPLED_FRAMES} consecutive frames, got {len(window)}"
+            )
+        frames = list(window)[-NUM_SAMPLED_FRAMES:]
+    else:
+        frames = sample_fixed_frames(window, NUM_SAMPLED_FRAMES)
 
     processed = []
     for frame in frames:
@@ -182,14 +273,60 @@ def preprocess_window(
 # Inference
 # --------------------------------------------------------------------------
 
+class WindowScores(NamedTuple):
+    classification: str
+    confidence: float
+    violence_score: float
+    weapon_score: float
+    violence_logit: float
+    weapon_logit: float
+
+
+def heads_to_classification(violence: float, weapon: float) -> tuple[str, float]:
+    """Independent heads -> the one label the existing alert queue understands.
+
+    Not a fusion cascade: both heads can be high at once, and when they are
+    the stronger score is reported as the primary class rather than one head
+    upgrading the other. `confidence` is that head's sigmoid, not a softmax.
+    """
+    is_violence = violence >= HEAD_THRESHOLD
+    is_weapon = weapon >= HEAD_THRESHOLD
+    if not is_violence and not is_weapon:
+        return NORMAL_CLASS, float(1.0 - max(violence, weapon))
+    if is_violence and not is_weapon:
+        return "Violence", violence
+    if is_weapon and not is_violence:
+        return "Weaponized", weapon
+    if weapon >= violence:
+        return "Weaponized", weapon
+    return "Violence", violence
+
+
 @torch.inference_mode()
 def classify_window(
     model: torch.nn.Module, window: Sequence[np.ndarray], device: torch.device
-) -> tuple[str, float, list[float]]:
-    logits = model(preprocess_window(window, device))
-    probs = torch.softmax(logits, dim=1)[0].float().cpu().numpy()
+) -> WindowScores:
+    consecutive = isinstance(model, MultiHeadR3D18)
+    output = model(preprocess_window(window, device, consecutive=consecutive))
+    if isinstance(output, tuple):
+        v_logit, w_logit = output
+        v_logit_f = float(v_logit.reshape(-1)[0])
+        w_logit_f = float(w_logit.reshape(-1)[0])
+        violence = float(torch.sigmoid(v_logit).reshape(-1)[0])
+        weapon = float(torch.sigmoid(w_logit).reshape(-1)[0])
+        classification, confidence = heads_to_classification(violence, weapon)
+        return WindowScores(
+            classification, confidence, violence, weapon, v_logit_f, w_logit_f
+        )
+
+    # Rollback path: old 3-class softmax r3d18.
+    probs = torch.softmax(output, dim=1)[0].float().cpu().numpy()
     best = int(probs.argmax())
-    return VIOLENCE_CLASSES[best], float(probs[best]), [float(p) for p in probs]
+    violence = float(probs[VIOLENCE_CLASSES.index("Violence")])
+    weapon = float(probs[VIOLENCE_CLASSES.index("Weaponized")])
+    return WindowScores(
+        VIOLENCE_CLASSES[best], float(probs[best]), violence, weapon, 0.0, 0.0
+    )
 
 
 def encode_frame(frame: np.ndarray, max_px: int, quality: int) -> str | None:
@@ -268,7 +405,7 @@ class VideoSource:
     def open(self) -> None:
         raise NotImplementedError
 
-    def frames(self) -> Iterator[np.ndarray]:
+    def frames(self) -> Iterator[tuple[np.ndarray, float]]:
         raise NotImplementedError
 
     @property
@@ -302,13 +439,25 @@ class FileVideoSource(VideoSource):
         assert self._capture is not None, "open() not called"
         return self._capture.get(cv2.CAP_PROP_FPS) or 0.0
 
-    def frames(self) -> Iterator[np.ndarray]:
+    def frames(self) -> Iterator[tuple[np.ndarray, float]]:
         assert self._capture is not None, "open() not called"
+        index = 0
+        fps = self.fps or 30.0
+        last_pts = 0.0
         while True:
             ok, frame = self._capture.read()
             if not ok:
                 return
-            yield frame
+            # Presentation time from the container — the same clock HTML5
+            # video.currentTime uses. index/fps drifts on VFR phone footage
+            # and puts a real model score on the wrong moment in the file.
+            pts_ms = float(self._capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+            pts = pts_ms / 1000.0 if pts_ms > 0 else (index + 1) / fps
+            if pts < last_pts:
+                pts = last_pts
+            last_pts = pts
+            index += 1
+            yield frame, pts
 
     def close(self) -> None:
         if self._capture is not None:
@@ -350,7 +499,7 @@ class RTSPVideoSource(VideoSource):
     def fps(self) -> float:
         raise self._not_implemented()
 
-    def frames(self) -> Iterator[np.ndarray]:
+    def frames(self) -> Iterator[tuple[np.ndarray, float]]:
         raise self._not_implemented()
         yield  # pragma: no cover -- makes this a generator function; never reached.
 
@@ -376,24 +525,38 @@ def build_video_source(*, source_type: str, video: Path | None, rtsp_url: str | 
 def build_event(
     *,
     timestamp: str | float,
+    offset_s: float,
+    window_start_s: float,
+    window_end_s: float,
     camera_id: str,
-    classification: str,
-    confidence: float,
+    scores: WindowScores,
     weapon: dict[str, Any],
     debug: dict[str, Any] | None,
     frame_image: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the event.
 
-    Note the separation: `classification`/`confidence` come only from the
-    violence classifier; weapon fields sit alongside them and are marked
-    unverified. Nothing here reads weapon state when deciding the class.
+    `classification`/`confidence` are derived from the two independent heads
+    so the existing alert pipeline can still debounce Violence / Weaponized.
+    `violence_score` / `weapon_score` are the raw sigmoid outputs — the live
+    overlay reads those, not the derived label. YOLO fields sit alongside
+    and stay unverified; nothing here reads them when deciding the class.
+    `window_start_s` / `window_end_s` are the clip the model actually saw,
+    so playback can look up the score for the current time instead of
+    guessing.
     """
     event: dict[str, Any] = {
         "timestamp": timestamp,
+        "offset_s": round(offset_s, 3),
+        "window_start_s": round(window_start_s, 3),
+        "window_end_s": round(window_end_s, 3),
         "camera_id": camera_id,
-        "classification": classification,
-        "confidence": round(confidence, 4),
+        "classification": scores.classification,
+        "confidence": round(scores.confidence, 4),
+        "violence_score": round(scores.violence_score, 4),
+        "weapon_score": round(scores.weapon_score, 4),
+        "violence_logit": round(scores.violence_logit, 4),
+        "weapon_logit": round(scores.weapon_logit, 4),
         "weapon_detected": weapon["detected"],
         "weapon_confidence": weapon["confidence"],
         "weapon_note": WEAPON_NOTE,
@@ -415,8 +578,9 @@ def run(args: argparse.Namespace) -> int:
     log = lambda msg: print(msg, file=sys.stderr, flush=True)  # noqa: E731
 
     log(f"[init] device={device}")
-    violence_model = load_violence_model(args.violence_model, device)
-    log(f"[init] violence classifier loaded: {args.violence_model.name}")
+    classifier = load_classifier(args.violence_model, device)
+    kind = "multi-head" if isinstance(classifier, MultiHeadR3D18) else "3-class-softmax"
+    log(f"[init] classifier loaded ({kind}): {args.violence_model.name}")
 
     weapon_model = None
     if not args.no_weapon_detector:
@@ -437,39 +601,63 @@ def run(args: argparse.Namespace) -> int:
         fps = args.fallback_fps
         log(f"[warn] source reports no FPS; assuming {fps}")
 
-    window_frames = max(NUM_SAMPLED_FRAMES, int(round(args.window_seconds * fps)))
-    stride_frames = max(1, int(round(args.stride_seconds * fps)))
-    log(
-        f"[init] fps={fps:g} window={window_frames}f ({args.window_seconds}s) "
-        f"stride={stride_frames}f ({args.stride_seconds}s) "
-        f"sampled={NUM_SAMPLED_FRAMES}f/window realtime={not args.no_realtime}"
-    )
+    if isinstance(classifier, MultiHeadR3D18):
+        # 12 consecutive frames, hop 4. Do not feed a 2s linspace clip:
+        # that mixes later incident frames into an empty hallway.
+        window_frames = NUM_SAMPLED_FRAMES
+        stride_frames = MULTIHEAD_STRIDE_FRAMES
+        log(
+            f"[init] fps={fps:g} multi-head consecutive={window_frames}f "
+            f"stride={stride_frames}f kind={kind} realtime={not args.no_realtime}"
+        )
+    else:
+        window_frames = max(NUM_SAMPLED_FRAMES, int(round(args.window_seconds * fps)))
+        stride_frames = max(1, int(round(args.stride_seconds * fps)))
+        log(
+            f"[init] fps={fps:g} window={window_frames}f ({args.window_seconds}s) "
+            f"stride={stride_frames}f ({args.stride_seconds}s) "
+            f"sampled={NUM_SAMPLED_FRAMES}f/window kind={kind} "
+            f"realtime={not args.no_realtime}"
+        )
 
     session_start = datetime.now(timezone.utc)
-    buffer: deque[np.ndarray] = deque(maxlen=window_frames)
+    buffer: deque[tuple[np.ndarray, float]] = deque(maxlen=window_frames)
     next_emit_index = window_frames - 1
     emitted = 0
     stream_start = time.perf_counter()
 
     try:
-        for index, frame in enumerate(source.frames()):
+        for index, (frame, pts) in enumerate(source.frames()):
             # Pace to wall clock so timing behaviour matches a real feed.
             if not args.no_realtime:
-                target = index / fps
                 elapsed = time.perf_counter() - stream_start
-                if elapsed < target:
-                    time.sleep(target - elapsed)
+                if elapsed < pts:
+                    time.sleep(pts - elapsed)
 
-            buffer.append(frame)
+            buffer.append((frame, pts))
             if len(buffer) < window_frames or index < next_emit_index:
                 continue
 
-            window = list(buffer)
+            window = [item[0] for item in buffer]
+            window_start_s = buffer[0][1]
+            window_end_s = buffer[-1][1]
+            if len(window) < NUM_SAMPLED_FRAMES:
+                log(
+                    f"[skip] t={window_end_s:.3f}s only {len(window)} frames "
+                    f"(need {NUM_SAMPLED_FRAMES}; no padding)"
+                )
+                next_emit_index = index + stride_frames
+                continue
             began = time.perf_counter()
 
-            # Sole driver of the alert.
-            classification, confidence, probs = classify_window(
-                violence_model, window, device
+            # Sole driver of the alert label: two independent sigmoid heads
+            # (or the old 3-class softmax, if that checkpoint was passed).
+            scores = classify_window(classifier, window, device)
+            log(
+                f"[score] {window_start_s:.3f}-{window_end_s:.3f}s n={len(window)} "
+                f"logit_v={scores.violence_logit:.4f} logit_w={scores.weapon_logit:.4f} "
+                f"sig_v={scores.violence_score:.4f} sig_w={scores.weapon_score:.4f} "
+                f"class={scores.classification}"
             )
 
             # Independent, informational. Middle frame is representative of the
@@ -486,12 +674,11 @@ def run(args: argparse.Namespace) -> int:
             # the window's end -- a middle frame would be a picture of a
             # different moment than the one the alert claims.
             frame_image = None
-            if args.include_frame and classification != NORMAL_CLASS:
+            if args.include_frame and scores.classification != NORMAL_CLASS:
                 frame_image = encode_frame(
                     window[-1], args.frame_max_px, args.frame_quality
                 )
 
-            window_end_s = (index + 1) / fps
             if args.timestamp_mode == "seconds":
                 timestamp: str | float = round(window_end_s, 3)
             else:
@@ -502,12 +689,13 @@ def run(args: argparse.Namespace) -> int:
             debug = None
             if args.include_debug_fields:
                 debug = {
-                    "window_start_s": round((index + 1 - window_frames) / fps, 3),
+                    "window_start_s": round(window_start_s, 3),
                     "window_end_s": round(window_end_s, 3),
                     "frame_index": index,
-                    "class_probabilities": dict(
-                        zip(VIOLENCE_CLASSES, (round(p, 4) for p in probs))
-                    ),
+                    "class_probabilities": {
+                        "violence": round(scores.violence_score, 4),
+                        "weapon": round(scores.weapon_score, 4),
+                    },
                     "weapon_label": weapon["label"],
                     "weapon_box_count": weapon["count"],
                     "inference_ms": round((time.perf_counter() - began) * 1000, 1),
@@ -517,9 +705,11 @@ def run(args: argparse.Namespace) -> int:
                 json.dumps(
                     build_event(
                         timestamp=timestamp,
+                        offset_s=window_end_s,
+                        window_start_s=window_start_s,
+                        window_end_s=window_end_s,
                         camera_id=args.camera_id,
-                        classification=classification,
-                        confidence=confidence,
+                        scores=scores,
                         weapon=weapon,
                         debug=debug,
                         frame_image=frame_image,
@@ -574,18 +764,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--violence-model", type=Path,
-        default=package / "models" / "violence_classifier_r3d18.pt",
-        help="R3D-18 violence classifier weights.",
+        default=here / "models" / "detecto-hackathon-final.pt",
+        help=(
+            "Classifier weights. Default is the locked-in multi-head model. "
+            "Pass Detecto_Demo_Package/models/violence_classifier_r3d18.pt to "
+            "roll back to the previous 3-class softmax head."
+        ),
     )
     parser.add_argument(
         "--weapon-model", type=Path,
-        default=package / "models" / "weapon_detector_yolov8.pt",
-        help="YOLOv8 weapon detector weights (informational overlay only).",
+        default=here / "models" / "weapon_localizer_yolov8.pt",
+        help="YOLOv8 weapon localizer weights (visual overlay only; not the alert).",
     )
     parser.add_argument("--camera-id", default="demo-camera-1", help="Camera identifier in events.")
     parser.add_argument("--window-seconds", type=float, default=2.0, help="Sliding window length.")
     parser.add_argument("--stride-seconds", type=float, default=0.5, help="Hop between windows.")
-    parser.add_argument("--weapon-conf", type=float, default=0.25, help="Weapon detector confidence threshold.")
+    parser.add_argument("--weapon-conf", type=float, default=0.5, help="Weapon localizer confidence threshold.")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"), help="Inference device.")
     parser.add_argument(
         "--timestamp-mode", default="iso8601", choices=("iso8601", "seconds"),

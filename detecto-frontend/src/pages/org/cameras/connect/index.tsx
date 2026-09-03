@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, Navigate } from 'react-router-dom'
 
 import { PageHeader } from '@/components/app-shell/page-header'
 import { Button } from '@/components/ui/button'
 import { Panel, PanelBody } from '@/components/ui/panel'
 import type { DiscoveredCamera, PairedBox } from '@/lib/cameras/api'
+import { DEMO_MODE } from '@/lib/config/demo'
 import { WizardProgress } from '@/pages/org/cameras/connect/progress'
 import { StepDone } from '@/pages/org/cameras/connect/steps/done'
 import { StepFind } from '@/pages/org/cameras/connect/steps/find'
@@ -34,6 +35,11 @@ export type CameraRow = { selected: boolean; name: string; zone: string }
  * only leave something behind that could never be resumed.
  */
 export default function ConnectCamerasPage() {
+  if (DEMO_MODE) return <Navigate to="/org/cameras" replace />
+  return <ConnectCamerasFlow />
+}
+
+function ConnectCamerasFlow() {
   const [step, setStep] = useState(1)
   const [box, setBox] = useState<PairedBox | null>(null)
   const [discovery, setDiscovery] = useState<Discovery | null>(null)

@@ -13,13 +13,12 @@ Thin by design. It owns four jobs and nothing else:
      see `Pipeline._persist` for why a failure here never takes the socket
      feed down with it.
 
-No user authentication of its own. One camera runs today (`DETECTO_VIDEO`
-against `test_video.mp4`, matching Phase 1), but the server itself supports
-N independently-configured cameras -- one `Pipeline`/inference subprocess
-each -- via `DETECTO_CAMERAS`; see `Config._load_cameras`. Adding a second
-test video as a second camera is a config change, not a code change. The
-Node API is reached with a shared internal key (`DETECTO_API_KEY`), not a
-user session -- see server/README.md.
+No user authentication of its own. Cameras can be named at boot via
+`DETECTO_CAMERAS` (or the single-camera DETECTO_* defaults) and also
+started and stopped later via POST/DELETE /pipelines, which is how a
+mid-session upload gets a subprocess without restarting this server.
+The Node API is reached with a shared internal key (`DETECTO_API_KEY`),
+not a user session -- see server/README.md.
 
 The inference script is run as a subprocess rather than imported because it is
 a CLI that owns its own capture loop and pacing, and because a crash in a model
@@ -29,6 +28,7 @@ forward pass then takes down a process we can see exit rather than the server.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -42,7 +42,7 @@ from typing import Any
 import aiohttp
 import socketio
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Body, Depends, FastAPI, Header, HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -63,10 +63,21 @@ HERE = Path(__file__).resolve().parent
 BACKEND = HERE.parent
 INFER_SCRIPT = BACKEND / "inference" / "live_infer.py"
 DEFAULT_VIDEO = BACKEND / "Detecto_Demo_Package" / "sample_outputs" / "test_video.mp4"
+# Always the locked-in multi-head weights — never the previous 3-class
+# softmax, even if live_infer.py's CLI default were pointed back at it.
+MULTIHEAD_WEIGHTS = BACKEND / "inference" / "models" / "detecto-hackathon-final.pt"
+WEAPON_LOCALIZER_WEIGHTS = BACKEND / "inference" / "models" / "weapon_localizer_yolov8.pt"
 
 # The event name the frontend listens on. Namespaced so a second stream (say
 # `camera:status`) can be added later without renaming this one.
 ALERT_EVENT = "alert:new"
+# Every window, including Normal — the live overlay, not the alert queue.
+TICK_EVENT = "detection:tick"
+TICK_HISTORY_EVENT = "detection:history"
+
+
+def camera_room(camera_id: str) -> str:
+    return f"camera:{camera_id}"
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -120,6 +131,8 @@ class CameraConfig:
             "--camera-id", self.camera_id,
             # ISO-8601 is what `Alert.detectedAt` is: an instant, not an offset.
             "--timestamp-mode", "iso8601",
+            "--violence-model", str(MULTIHEAD_WEIGHTS),
+            "--weapon-model", str(WEAPON_LOCALIZER_WEIGHTS),
         ]
         if self.source_type == "file":
             command += ["--video", str(self.video)]
@@ -155,7 +168,7 @@ class Config:
             origin.strip()
             for origin in os.environ.get(
                 "DETECTO_CORS_ORIGINS",
-                "http://localhost:5173,http://127.0.0.1:5173",
+                "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5176,http://127.0.0.1:5176",
             ).split(",")
             if origin.strip()
         ]
@@ -187,6 +200,11 @@ class Config:
         same DETECTO_CAMERA_ID/_NAME/_ZONE/DETECTO_VIDEO/... env vars this
         server has always read -- today's single-camera behavior is just
         the N=1 case of this, byte-for-byte unchanged.
+
+        An explicit empty array (`DETECTO_CAMERAS=[]`) is the other
+        deliberate case: no cameras at boot. Pipelines can then be started
+        later via POST /pipelines, which is how a mid-session upload gets a
+        subprocess without restarting this server.
         """
         raw = os.environ.get("DETECTO_CAMERAS")
         if not raw:
@@ -196,8 +214,8 @@ class Config:
             entries = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise SystemExit(f"[error] DETECTO_CAMERAS is not valid JSON: {exc}")
-        if not isinstance(entries, list) or not entries:
-            raise SystemExit("[error] DETECTO_CAMERAS must be a non-empty JSON array")
+        if not isinstance(entries, list):
+            raise SystemExit("[error] DETECTO_CAMERAS must be a JSON array")
         return [self._camera_from_dict(entry) for entry in entries]
 
     def _camera_from_dict(self, entry: dict[str, Any]) -> CameraConfig:
@@ -211,7 +229,7 @@ class Config:
             zone=entry.get("zone", os.environ.get("DETECTO_ZONE", "Demo feed")),
             # What `Alert.model` reports: "the model build that raised it, so
             # a bad release can be traced".
-            model=entry.get("model", os.environ.get("DETECTO_MODEL", "r3d18-scvd 0.1")),
+            model=entry.get("model", os.environ.get("DETECTO_MODEL", "detecto-hackathon-final")),
             source_type=source_type,
             video=Path(video) if source_type == "file" else None,
             rtsp_url=entry.get("rtspUrl"),
@@ -266,6 +284,33 @@ async def connect(sid: str, environ: dict[str, Any], auth: Any = None) -> None:
 async def disconnect(sid: str, reason: str | None = None) -> None:
     _clients.discard(sid)
     log.info("client disconnected sid=%s (%d connected)", sid, len(_clients))
+
+
+@sio.event
+async def watch_camera(sid: str, data: Any = None) -> None:
+    """Replay ticks already classified for this camera, then keep emitting live.
+
+    The live page plays an uploaded file from t=0; inference may already be
+    ahead. History lets the overlay look up a score by video.currentTime
+    instead of only showing whatever arrived after the page opened.
+    """
+    camera_id = ""
+    if isinstance(data, dict):
+        camera_id = str(data.get("cameraId") or data.get("camera_id") or "")
+    # One room per camera so a Watch-live page never receives another
+    # pipeline's ticks (broadcast used to send every camera to every client).
+    for room in sio.rooms(sid):
+        if isinstance(room, str) and room.startswith("camera:"):
+            await sio.leave_room(sid, room)
+    if camera_id:
+        await sio.enter_room(sid, camera_room(camera_id))
+    pipeline = registry.get(camera_id) if camera_id else None
+    ticks = list(pipeline.ticks) if pipeline else []
+    await sio.emit(
+        TICK_HISTORY_EVENT,
+        {"cameraId": camera_id, "ticks": ticks},
+        to=sid,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +404,10 @@ class Pipeline:
         # between one alert and the next. Tracked here so `stop()` can wait
         # for whatever is still in flight instead of cancelling it mid-POST.
         self.persist_tasks: set[asyncio.Task[None]] = set()
+        # Every window this run has classified, including Normal. The live
+        # playback page asks for this on subscribe so a late join still has
+        # scores to overlay against video.currentTime.
+        self.ticks: list[dict[str, Any]] = []
 
     def _tally(self) -> str:
         return (
@@ -367,6 +416,27 @@ class Pipeline:
             f"{self.emitted} alert(s) emitted, "
             f"{self.persisted} persisted, {self.persist_failed} persist failure(s)"
         )
+
+    def _timeline_path(self) -> Path | None:
+        video = self.camera.video
+        if video is None:
+            return None
+        return video.with_name(f"{video.stem}.detections.json")
+
+    def _persist_timeline(self, *, complete: bool) -> None:
+        """Write the scored timeline next to the file so Watch live can
+        look up a moment after this process has finished (or restarted).
+        """
+        path = self._timeline_path()
+        if path is None:
+            return
+        try:
+            path.write_text(
+                json.dumps({"complete": complete, "ticks": self.ticks}),
+                encoding="utf-8",
+            )
+        except OSError:
+            log.exception("[%s] could not write detection timeline %s", self.camera.camera_id, path)
 
     async def start(self) -> None:
         self.http = aiohttp.ClientSession(
@@ -384,10 +454,9 @@ class Pipeline:
             self.camera.camera_id, self.cpu_threads, os.cpu_count() or self.cpu_threads,
         )
         # The retry loop itself, running detached in its own task -- `start()`
-        # returns as soon as it's scheduled, so `lifespan()`'s
-        # `asyncio.gather(*(pipeline.start() for pipeline in pipelines))`
-        # never waits on (or can be blocked by) any one camera's launch,
-        # retries, or backoff.
+        # returns as soon as it's scheduled, so whoever called it (boot-time
+        # `lifespan()`, or POST /pipelines) is not blocked by this camera's
+        # launch, retries, or backoff.
         self.supervisor_task = asyncio.create_task(
             self._supervise(), name=f"supervise-{self.camera.camera_id}"
         )
@@ -427,6 +496,7 @@ class Pipeline:
                 # stopped coming.
                 self.status = "stopped"
                 self.consecutive_failures = 0
+                self._persist_timeline(complete=True)
                 log.info(
                     "[%s] finished cleanly (exit=0); not retrying", self.camera.camera_id
                 )
@@ -457,6 +527,7 @@ class Pipeline:
         """
         command = self.camera.infer_command(python=config.python)
         log.info("[%s] starting inference: %s", self.camera.camera_id, " ".join(command))
+        self.ticks = []
 
         # PyTorch/OpenMP/MKL each default to claiming every logical core for
         # their own intra-op thread pool -- fine for one subprocess, but N
@@ -577,6 +648,20 @@ class Pipeline:
     async def _handle(self, event: dict[str, Any]) -> None:
         self.seen += 1
 
+        tick = {
+            "cameraId": event.get("camera_id") or self.camera.camera_id,
+            "offsetS": event.get("offset_s"),
+            "startS": event.get("window_start_s"),
+            "endS": event.get("window_end_s"),
+            "timestamp": event.get("timestamp"),
+            "classification": event.get("classification"),
+            "violence": event.get("violence_score"),
+            "weapon": event.get("weapon_score"),
+        }
+        self.ticks.append(tick)
+        self._persist_timeline(complete=False)
+        await sio.emit(TICK_EVENT, tick, room=camera_room(self.camera.camera_id))
+
         # Every window is offered to the grouper, Normal included -- a Normal
         # window is what closes an open incident, so it carries information
         # even though it never becomes an alert.
@@ -674,22 +759,89 @@ class Pipeline:
             log.warning("failed to persist %s: %s: %s", alert["id"], type(exc).__name__, exc)
 
 
-# Shared across every Pipeline below -- see Pipeline.__init__'s own note on
-# why `ids` (unlike `incidents`) must not be per-camera.
-_shared_ids = AlertIdSequence()
+class PipelineExistsError(Exception):
+    """POST /pipelines named a cameraId that already has a Pipeline."""
 
-# Split evenly across however many cameras are actually configured -- with
-# one camera (today's default), this is `os.cpu_count()`, i.e. no change
-# from the unrestricted default PyTorch/OpenMP would already pick.
-_cpu_threads_per_camera = max(1, (os.cpu_count() or 4) // max(1, len(config.cameras)))
+    def __init__(self, camera_id: str) -> None:
+        super().__init__(camera_id)
+        self.camera_id = camera_id
 
-# One Pipeline per configured camera (one today; `DETECTO_CAMERAS` can name
-# more -- see `Config._load_cameras`). Independent subprocesses, independent
-# state; nothing here assumes there's exactly one.
-pipelines = [
-    Pipeline(camera, ids=_shared_ids, cpu_threads=_cpu_threads_per_camera)
-    for camera in config.cameras
-]
+
+class PipelineRegistry:
+    """Owns every Pipeline in this process, whether it came from boot-time
+    `config.cameras` or from a later POST /pipelines.
+
+    The point of this object is that adding a camera after `lifespan()` has
+    already yielded is not a second code path. `start()` constructs the
+    same `Pipeline` class, with the same shared `AlertIdSequence`, the same
+    per-camera `IncidentGrouper`, and the same CPU-thread split the boot
+    list used to compute once at import -- so a dynamically-started
+    pipeline is indistinguishable from a boot-time one in /health, in
+    retry behaviour, and in how it dies.
+    """
+
+    def __init__(self) -> None:
+        self._pipelines: dict[str, Pipeline] = {}
+        self._lock = asyncio.Lock()
+        # Shared across every Pipeline -- see Pipeline.__init__'s own note
+        # on why `ids` (unlike `incidents`) must not be per-camera.
+        self._ids = AlertIdSequence()
+
+    def get(self, camera_id: str) -> Pipeline | None:
+        return self._pipelines.get(camera_id)
+
+    def snapshot(self) -> list[Pipeline]:
+        return list(self._pipelines.values())
+
+    def _cpu_threads_for_next(self) -> int:
+        # Same formula the module-level list used, evaluated at launch
+        # time rather than import time so a camera added later is capped
+        # against however many are already running, not against however
+        # many happened to be in the env at boot.
+        n = len(self._pipelines) + 1
+        return max(1, (os.cpu_count() or 4) // n)
+
+    async def start(self, camera: CameraConfig) -> Pipeline:
+        async with self._lock:
+            if camera.camera_id in self._pipelines:
+                raise PipelineExistsError(camera.camera_id)
+            pipeline = Pipeline(
+                camera,
+                ids=self._ids,
+                cpu_threads=self._cpu_threads_for_next(),
+            )
+            self._pipelines[camera.camera_id] = pipeline
+        await pipeline.start()
+        return pipeline
+
+    async def stop(self, camera_id: str) -> bool:
+        """Stop one pipeline and drop it from the registry.
+
+        Returns False if nothing was running under that id. The entry stays
+        in the map until `Pipeline.stop()` finishes so a concurrent POST of
+        the same cameraId cannot spawn a second subprocess alongside the
+        one that is still terminating -- it gets PipelineExistsError
+        instead, and can retry once this returns.
+        """
+        async with self._lock:
+            pipeline = self._pipelines.get(camera_id)
+        if pipeline is None:
+            return False
+        await pipeline.stop()
+        async with self._lock:
+            if self._pipelines.get(camera_id) is pipeline:
+                del self._pipelines[camera_id]
+        return True
+
+    async def stop_all(self) -> None:
+        async with self._lock:
+            pipelines = list(self._pipelines.values())
+            self._pipelines.clear()
+        if pipelines:
+            await asyncio.gather(*(pipeline.stop() for pipeline in pipelines))
+
+
+registry = PipelineRegistry()
 
 
 # --------------------------------------------------------------------------
@@ -712,16 +864,24 @@ async def lifespan(_: FastAPI):
     # goes bad after a clean start. One mechanism, not two.
     if not INFER_SCRIPT.exists():
         raise SystemExit(f"[error] missing file: {INFER_SCRIPT}")
+    if not MULTIHEAD_WEIGHTS.exists():
+        raise SystemExit(f"[error] missing new model: {MULTIHEAD_WEIGHTS}")
+    if not WEAPON_LOCALIZER_WEIGHTS.exists():
+        raise SystemExit(f"[error] missing weapon localizer: {WEAPON_LOCALIZER_WEIGHTS}")
     if not config.api_key:
         raise SystemExit(
             "[error] DETECTO_API_KEY is not set. It must match INTERNAL_API_KEY "
             "in detecto-backend/api's environment -- see server/README.md."
         )
-    await asyncio.gather(*(pipeline.start() for pipeline in pipelines))
+    # Boot-time cameras (including "none" -- DETECTO_CAMERAS=[]) go through
+    # the same registry.start() a later POST /pipelines will, so the two
+    # are not different kinds of Pipeline.
+    if config.cameras:
+        await asyncio.gather(*(registry.start(camera) for camera in config.cameras))
     try:
         yield
     finally:
-        await asyncio.gather(*(pipeline.stop() for pipeline in pipelines))
+        await registry.stop_all()
 
 
 api = FastAPI(title="Detecto alert stream", lifespan=lifespan)
@@ -757,7 +917,7 @@ async def health() -> dict[str, Any]:
             "persistFailures": pipeline.persist_failed,
         }
 
-    cameras = [camera_health(pipeline) for pipeline in pipelines]
+    cameras = [camera_health(pipeline) for pipeline in registry.snapshot()]
     total = lambda key: sum(camera[key] for camera in cameras)  # noqa: E731
 
     return {
@@ -776,8 +936,66 @@ async def health() -> dict[str, Any]:
         "alertsPersisted": total("alertsPersisted"),
         "persistFailures": total("persistFailures"),
         "event": ALERT_EVENT,
+        "tickEvent": TICK_EVENT,
         PIPELINE_STATUS_KEY: PIPELINE_STATUS,
     }
+
+
+async def require_internal_key(
+    x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
+) -> None:
+    """Same shared secret POST /api/alerts uses (`DETECTO_API_KEY`).
+
+    These pipeline controls are an internal demo-mode surface, not a public
+    API -- they still must not be wide open on the port. Timing-safe compare
+    matches detecto-backend/api's requireInternalKey; a length mismatch is
+    itself a miss, not padded into a comparison that would hide it.
+    """
+    expected = config.api_key
+    if not isinstance(x_internal_api_key, str) or not expected:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    given = x_internal_api_key.encode("utf-8")
+    want = expected.encode("utf-8")
+    if len(given) != len(want) or not hmac.compare_digest(given, want):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@api.post("/pipelines", status_code=201, dependencies=[Depends(require_internal_key)])
+async def create_pipeline(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    """Launch a Pipeline for one camera, after boot.
+
+    Body is the same shape as one `DETECTO_CAMERAS` entry -- `id`, `name`,
+    `zone`, `video`, `sourceType`, `realtime`, and the rest -- so a caller
+    does not have to learn a second config language. Missing fields fall
+    through `Config._camera_from_dict` to the same DETECTO_* defaults boot
+    uses.
+    """
+    camera = config._camera_from_dict(body)
+    try:
+        pipeline = await registry.start(camera)
+    except PipelineExistsError:
+        raise HTTPException(status_code=409, detail="pipeline_exists")
+    log.info("[%s] pipeline started on request", camera.camera_id)
+    return {
+        "ok": True,
+        "cameraId": camera.camera_id,
+        "status": pipeline.status,
+    }
+
+
+@api.delete("/pipelines/{camera_id}", dependencies=[Depends(require_internal_key)])
+async def delete_pipeline(camera_id: str) -> dict[str, Any]:
+    """Stop one Pipeline the same way process shutdown does, then drop it.
+
+    After this returns, POST /pipelines of the same cameraId is a new
+    Pipeline -- new IncidentGrouper, new counters -- not a resume of the
+    one that just died.
+    """
+    stopped = await registry.stop(camera_id)
+    if not stopped:
+        raise HTTPException(status_code=404, detail="not_found")
+    log.info("[%s] pipeline stopped on request", camera_id)
+    return {"ok": True, "cameraId": camera_id}
 
 
 asgi = socketio.ASGIApp(sio, other_asgi_app=api)

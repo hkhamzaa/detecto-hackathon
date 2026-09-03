@@ -1,5 +1,7 @@
-# Large model weight files
+# Large model weight files (GitHub rejects files over 100MB)
 detecto-backend/Detecto_Demo_Package/models/*.pt
+detecto-backend/Detecto_Hackathon_Final/models/*.pt
+detecto-backend/inference/models/*.pt
 
 # Large sample output videos
 detecto-backend/Detecto_Demo_Package/sample_outputs/*.mp4

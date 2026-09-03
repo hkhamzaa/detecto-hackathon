@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { approveCamera, listCameras } from '@/lib/cameras/api'
+import { approveCamera, getCamera, listCameras, uploadDemoVideo } from '@/lib/cameras/api'
 
 /** One key, so the list page and the wizard cannot drift apart. */
 export const CAMERAS_KEY = ['cameras'] as const
@@ -17,6 +17,35 @@ export function useCameras() {
       const result = await listCameras()
       if (!result.ok) throw new Error(result.code)
       return result.cameras
+    },
+  })
+}
+
+export function useCamera(id: string | undefined) {
+  return useQuery({
+    queryKey: [...CAMERAS_KEY, id],
+    enabled: Boolean(id),
+    queryFn: async () => {
+      const result = await getCamera(id as string)
+      if (!result.ok) throw new Error(result.code)
+      return result.camera
+    },
+  })
+}
+
+export function useUploadDemoVideo() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (input: { file: File; name?: string; zone?: string }) => {
+      const result = await uploadDemoVideo(input)
+      if (!result.ok) {
+        throw Object.assign(new Error(result.code), result)
+      }
+      return result
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: CAMERAS_KEY })
     },
   })
 }

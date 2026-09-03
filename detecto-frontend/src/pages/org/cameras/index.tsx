@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react'
 
 import { PageHeader } from '@/components/app-shell/page-header'
 import { CameraStatus } from '@/components/camera/camera-status'
+import { DemoUploadPanel } from '@/components/camera/demo-upload'
 import { CONNECT_PATH, NoCamerasYet } from '@/components/camera/no-cameras-yet'
 import { ReviewStatusBadge } from '@/components/camera/review-status-badge'
 import { Button } from '@/components/ui/button'
@@ -17,6 +18,7 @@ import {
 } from '@/components/ui/table'
 import type { Camera } from '@/lib/cameras/api'
 import { useApproveCamera, useCameras } from '@/lib/cameras/queries'
+import { DEMO_MODE } from '@/lib/config/demo'
 import { formatRelative, formatTimestamp } from '@/lib/time'
 
 export default function OrgCamerasPage() {
@@ -28,9 +30,13 @@ export default function OrgCamerasPage() {
       <PageHeader
         eyebrow="Organisation"
         title="Cameras"
-        lead="The cameras Detecto is watching for you, and whether each one is sending a picture right now."
+        lead={
+          DEMO_MODE
+            ? 'Demo mode: upload a video file to simulate a live camera feed. The same model and the same alert pipeline run against the file — this is not a live camera.'
+            : 'The cameras Detecto is watching for you, and whether each one is sending a picture right now.'
+        }
         action={
-          hasCameras ? (
+          hasCameras && !DEMO_MODE ? (
             <Button asChild>
               <Link to={CONNECT_PATH}>
                 <Plus />
@@ -41,12 +47,14 @@ export default function OrgCamerasPage() {
         }
       />
 
+      {DEMO_MODE && <DemoUploadPanel />}
+
       {isPending ? (
         <Loading />
       ) : isError ? (
         <Unavailable onRetry={() => void refetch()} pending={isFetching} />
       ) : cameras.length === 0 ? (
-        <NoCamerasYet />
+        DEMO_MODE ? null : <NoCamerasYet />
       ) : (
         <CameraTable cameras={cameras} />
       )}
@@ -121,7 +129,7 @@ function CameraTable({ cameras }: { cameras: Camera[] }) {
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Last picture</TableHead>
               <TableHead className="text-right">
-                <span className="sr-only">Review</span>
+                <span className="sr-only">Actions</span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -153,7 +161,16 @@ function CameraTable({ cameras }: { cameras: Camera[] }) {
                   )}
                 </TableCell>
                 <TableCell className="text-right">
-                  {camera.reviewStatus === 'pending' && <ApproveButton camera={camera} />}
+                  <div className="inline-flex flex-col items-end gap-1">
+                    {DEMO_MODE && camera.sourceType === 'file' && (
+                      <Button asChild variant="outline" size="sm">
+                        <Link to={`/org/cameras/${camera.id}/live`}>Watch live</Link>
+                      </Button>
+                    )}
+                    {!DEMO_MODE && camera.reviewStatus === 'pending' && (
+                      <ApproveButton camera={camera} />
+                    )}
+                  </div>
                 </TableCell>
               </TableRow>
             ))}

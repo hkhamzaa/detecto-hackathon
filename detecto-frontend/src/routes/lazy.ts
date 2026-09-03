@@ -28,6 +28,7 @@ export const AdminSupport = lazy(() => admin().then((m) => ({ default: m.AdminSu
 export const OrgOverview = lazy(() => org().then((m) => ({ default: m.OrgOverview })))
 export const OrgCameras = lazy(() => org().then((m) => ({ default: m.OrgCameras })))
 export const OrgCamerasConnect = lazy(() => org().then((m) => ({ default: m.OrgCamerasConnect })))
+export const OrgCameraLive = lazy(() => org().then((m) => ({ default: m.OrgCameraLive })))
 export const OrgModules = lazy(() => org().then((m) => ({ default: m.OrgModules })))
 export const OrgAlerts = lazy(() => org().then((m) => ({ default: m.OrgAlerts })))
 export const OrgAlertDetail = lazy(() => org().then((m) => ({ default: m.OrgAlertDetail })))

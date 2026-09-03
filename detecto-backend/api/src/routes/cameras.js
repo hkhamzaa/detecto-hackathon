@@ -1,12 +1,31 @@
-import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
+import { Router } from 'express';
+import multer from 'multer';
+
+import { config } from '../config.js';
 import { pool } from '../db.js';
 import { requireActiveOrg, requireAuth, requireOrgScope, requirePermission } from '../middleware/auth.js';
 import { isUuid } from '../lib/validation.js';
 import { actorSnapshot, logAudit } from '../lib/audit.js';
+import { launchPipeline } from '../lib/pipeline.js';
 
 export const camerasRouter = Router();
 
+camerasRouter.use((req, res, next) => {
+  // <video> cannot send an Authorization header. This one GET accepts the
+  // same access token as a query param so the browser can range-request the
+  // file. Restricted to the video path so it does not widen any other route.
+  const isVideo =
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    /\/[0-9a-fA-F-]{36}\/video\/?$/.test(req.path);
+  if (isVideo && typeof req.query.access_token === 'string' && !req.headers.authorization) {
+    req.headers.authorization = `Bearer ${req.query.access_token}`;
+  }
+  next();
+});
 camerasRouter.use(requireAuth, requireOrgScope, requireActiveOrg);
 
 camerasRouter.param('id', (req, res, next, id) => {
@@ -160,6 +179,158 @@ camerasRouter.post('/', CAN_MUTATE, async (req, res) => {
   }
 });
 
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv', '.m4v']);
+const VIDEO_MIME = new Set([
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/x-msvideo',
+  'video/avi',
+  'video/x-matroska',
+  'video/mkv',
+  'application/octet-stream',
+]);
+const NAME_MAX = 48;
+const ZONE_MAX = 40;
+
+function ensureUploadDir() {
+  fs.mkdirSync(config.uploadDir, { recursive: true });
+}
+
+const demoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      try {
+        ensureUploadDir();
+        cb(null, config.uploadDir);
+      } catch (err) {
+        cb(err);
+      }
+    },
+    filename: (_req, file, cb) => {
+      const ext = VIDEO_EXTENSIONS.has(path.extname(file.originalname).toLowerCase())
+        ? path.extname(file.originalname).toLowerCase()
+        : '.mp4';
+      cb(null, `${randomUUID()}${ext}`);
+    },
+  }),
+  limits: { fileSize: config.maxUploadBytes, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const mime = (file.mimetype || '').toLowerCase();
+    if (VIDEO_EXTENSIONS.has(ext) && (VIDEO_MIME.has(mime) || mime.startsWith('video/'))) {
+      return cb(null, true);
+    }
+    cb(Object.assign(new Error('unsupported_video_type'), { code: 'unsupported_video_type' }));
+  },
+});
+
+function demoUploadMiddleware(req, res, next) {
+  if (!config.demoMode) return res.status(404).json({ error: 'not_found' });
+  demoUpload.single('video')(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'file_too_large' });
+    }
+    const unsupported = err.code === 'unsupported_video_type' || err.message === 'unsupported_video_type';
+    return res.status(422).json({
+      error: 'validation_failed',
+      errors: {
+        video: unsupported
+          ? 'Upload a video file (MP4, WebM, MOV, AVI, or MKV).'
+          : 'Could not read the upload.',
+      },
+    });
+  });
+}
+
+function demoCameraName(req) {
+  const typed = String(req.body?.name ?? '').trim().slice(0, NAME_MAX);
+  if (typed) return typed;
+  const original = req.file?.originalname ?? '';
+  const stem = path.basename(original, path.extname(original)).trim().slice(0, NAME_MAX);
+  return stem || 'Demo camera';
+}
+
+function demoCameraZone(req) {
+  const typed = String(req.body?.zone ?? '').trim().slice(0, ZONE_MAX);
+  return typed || 'Demo feed';
+}
+
+/**
+ * POST /api/cameras/upload — hackathon demo only (config.demoMode).
+ *
+ * Multipart field `video` plus optional `name` / `zone`. Saves the file,
+ * inserts a real camera (`source_type: 'file'`, `source_uri` = absolute
+ * path), then calls the existing Python POST /pipelines so the same model
+ * and the same Socket.IO path run against it. Nothing here fakes an alert.
+ */
+camerasRouter.post('/upload', CAN_MUTATE, demoUploadMiddleware, async (req, res) => {
+  if (!req.file) {
+    return res.status(422).json({
+      error: 'validation_failed',
+      errors: { video: 'A video file is required.' },
+    });
+  }
+
+  const savedPath = path.resolve(req.file.path);
+  const name = demoCameraName(req);
+  const zone = demoCameraZone(req);
+
+  const client = await pool.connect();
+  let camera;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO cameras (org_id, name, zone, online, last_seen, address, source_type, source_uri)
+       VALUES ($1, $2, $3, true, now(), NULL, 'file', $4)
+       RETURNING id, name, zone, online, last_seen, review_status, source_type`,
+      [req.claims.orgId, name, zone, savedPath],
+    );
+    camera = rows[0];
+
+    await client.query(
+      `INSERT INTO camera_modules (camera_id, module_id)
+       SELECT $1, id FROM modules WHERE id IN ('weapon', 'violence') AND status = 'live'
+       ON CONFLICT (camera_id, module_id) DO NOTHING`,
+      [camera.id],
+    );
+
+    const actor = await actorSnapshot(client, req.claims.sub);
+    await logAudit(client, {
+      orgId: req.claims.orgId,
+      actor,
+      action: 'camera.added',
+      summary: `Added the camera ${camera.name}`,
+      detail: [`Demo upload: ${camera.name} to ${camera.zone}.`],
+    });
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    fs.unlink(savedPath, () => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  try {
+    const pipeline = await launchPipeline({
+      id: camera.id,
+      name: camera.name,
+      zone: camera.zone,
+      sourceUri: savedPath,
+    });
+    res.status(201).json({ camera: toWireCamera(camera), pipeline });
+  } catch (err) {
+    console.error('demo upload: pipeline launch failed', err);
+    res.status(502).json({
+      error: 'pipeline_unavailable',
+      camera: toWireCamera(camera),
+    });
+  }
+});
+
 camerasRouter.get('/:id', requirePermission('cameras:view'), async (req, res) => {
   const { rows } = await pool.query(
     `${CAMERA_SELECT} WHERE c.id = $1 AND c.org_id = $2`,
@@ -167,6 +338,82 @@ camerasRouter.get('/:id', requirePermission('cameras:view'), async (req, res) =>
   );
   if (!rows[0]) return res.status(404).json({ error: 'not_found' });
   res.status(200).json(toWireCamera(rows[0]));
+});
+
+const VIDEO_CONTENT_TYPE = {
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/mp4',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+};
+
+/**
+ * GET /api/cameras/:id/video — stream the uploaded demo file for <video>.
+ *
+ * Reuses `cameras.source_uri` written by POST /api/cameras/upload. File
+ * cameras only; an RTSP / unconfigured row has nothing to play. Auth is
+ * the same JWT as every other camera route (Bearer, or `?access_token=`
+ * because a media element cannot attach headers).
+ */
+camerasRouter.get('/:id/video', requirePermission('cameras:view'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT source_type, source_uri FROM cameras WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.claims.orgId],
+  );
+  const camera = rows[0];
+  if (!camera) return res.status(404).json({ error: 'not_found' });
+  if (camera.source_type !== 'file' || !camera.source_uri) {
+    return res.status(404).json({ error: 'no_video' });
+  }
+
+  const stored = path.resolve(camera.source_uri);
+  if (!fs.existsSync(stored) || !fs.statSync(stored).isFile()) {
+    return res.status(404).json({ error: 'no_video' });
+  }
+
+  const type = VIDEO_CONTENT_TYPE[path.extname(stored).toLowerCase()] ?? 'application/octet-stream';
+  res.setHeader('Content-Type', type);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.sendFile(stored);
+});
+
+/**
+ * GET /api/cameras/:id/detections — the model timeline for Watch live.
+ *
+ * Written by the Python pipeline next to the uploaded file as it scores
+ * each window. Playback looks up the current time in this list; it is not
+ * invented in the browser.
+ */
+camerasRouter.get('/:id/detections', requirePermission('cameras:view'), async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT source_type, source_uri FROM cameras WHERE id = $1 AND org_id = $2`,
+    [req.params.id, req.claims.orgId],
+  );
+  const camera = rows[0];
+  if (!camera) return res.status(404).json({ error: 'not_found' });
+  if (camera.source_type !== 'file' || !camera.source_uri) {
+    return res.status(200).json({ complete: false, ticks: [] });
+  }
+
+  const stored = path.resolve(camera.source_uri);
+  const parsed = path.parse(stored);
+  const timeline = path.join(parsed.dir, `${parsed.name}.detections.json`);
+  if (!fs.existsSync(timeline)) {
+    return res.status(200).json({ complete: false, ticks: [] });
+  }
+
+  try {
+    const body = JSON.parse(fs.readFileSync(timeline, 'utf8'));
+    const ticks = Array.isArray(body.ticks) ? body.ticks : [];
+    return res.status(200).json({
+      complete: body.complete === true,
+      ticks,
+    });
+  } catch {
+    return res.status(200).json({ complete: false, ticks: [] });
+  }
 });
 
 /**

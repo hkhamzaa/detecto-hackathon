@@ -19,6 +19,7 @@ import {
 
 import { can, type Claims } from '@/lib/auth/claims'
 import { landingPathFor } from '@/lib/auth/redirect'
+import { DEMO_MODE } from '@/lib/config/demo'
 
 /**
  * The navigation model, and the only gate on it.
@@ -47,6 +48,8 @@ export type NavItem = {
   icon: LucideIcon
   /** A grant, or several — holding any one of them shows the item. */
   permission: string | string[]
+  /** Hidden (not deleted) when the hackathon demo flag is on. */
+  hiddenInDemo?: boolean
 }
 
 export type NavArea = {
@@ -71,7 +74,7 @@ const AREAS: NavArea[] = [
       { to: '/admin/tenants', label: 'Tenants', icon: Building2, permission: 'admin:tenants' },
       { to: '/admin/billing', label: 'Billing', icon: CreditCard, permission: 'admin:billing' },
       { to: '/admin/module-flags', label: 'Module flags', icon: ToggleRight, permission: 'admin:modules' },
-      { to: '/admin/system-health', label: 'System health', icon: Activity, permission: 'admin:health' },
+      { to: '/admin/system-health', label: 'System health', icon: Activity, permission: 'admin:health', hiddenInDemo: true },
       { to: '/admin/analytics', label: 'Analytics', icon: ChartLine, permission: 'admin:analytics' },
       { to: '/admin/support', label: 'Support', icon: LifeBuoy, permission: 'admin:support' },
     ],
@@ -127,7 +130,12 @@ export function navFor(claims: Claims | null): NavArea | null {
   const area = AREAS.find((a) => a.items.some((item) => item.to === landing))
   if (!area) return null
 
-  return { ...area, items: area.items.filter((item) => permits(claims, item.permission)) }
+  return {
+    ...area,
+    items: area.items.filter(
+      (item) => permits(claims, item.permission) && !(DEMO_MODE && item.hiddenInDemo),
+    ),
+  }
 }
 
 /** True only for routes that would also appear in this person's sidebar. */

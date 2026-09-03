@@ -34,19 +34,14 @@ import { useAuthStore } from '@/store/auth-store'
  * What people did in this organisation, and when.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * WHAT THIS PAGE IS, AND WHAT IT IS NOT
+ * WHAT THIS PAGE IS
  *
- * It is the view. It is not the record — there is no audit-event endpoint, and
- * nothing shown here is stored anywhere. The banner above the table says so in
- * those words, and it is the first thing on the page rather than a footnote,
- * because this is the one surface in the product where somebody might rely on
- * what they are reading in front of a regulator.
- *
- * The full argument is in the header of `lib/audit/api.ts`: a log the browser
- * assembles can only contain what this browser was told about, cannot be
- * append-only, and is stamped with whatever clock happened to be looking. Those
- * are not gaps to be closed later in this file. They are the reason the log has
- * to be written server-side, by the transaction that performs the action.
+ * It is the view of a record that is written when the action happens and kept.
+ * Confirming an alert, adding a camera, changing a role — each of those writes
+ * an entry on the server. The banner above the table says so in those words,
+ * and it is the first thing on the page rather than a footnote, because this is
+ * the one surface in the product where somebody might rely on what they are
+ * reading in front of a regulator.
  *
  * PERMISSION
  *
@@ -129,7 +124,7 @@ export default function OrgAuditLogPage() {
         }
       />
 
-      <NotTheRecord />
+      <StoredRecord />
 
       {log.isPending ? (
         <Loading />
@@ -175,24 +170,20 @@ export default function OrgAuditLogPage() {
  * Above the table, not below it.
  *
  * An organisation could otherwise take a screenshot of this page into a
- * compliance pack believing it was a record. The placeholder this page replaced
- * promised an append-only log that nobody can edit — true of what is being
- * built, and not true of anything on screen today, so the promise is not
- * repeated here until something can keep it.
+ * compliance pack believing the *screenshot* was the record. The entries are
+ * stored; this page is a view of them. The banner says both, in that order.
  */
-function NotTheRecord() {
+function StoredRecord() {
   return (
     <div className="mb-6 rounded-md border border-neutral-300 bg-paper-sunken px-4 py-3.5">
       <p className="max-w-2xl text-meta text-neutral-700">
-        <strong className="font-medium text-ink">
-          This is a view of a record that does not exist yet.
-        </strong>{' '}
-        Detecto has no audit-event service, so nothing below is stored: the feed
-        is assembled for this page, and it can only ever contain what this
-        browser was told about. Actions taken in another session, from an API
-        token, or by Detecto support would not appear at all. Do not put it in a
-        compliance pack, and do not treat a missing entry as evidence that
-        nothing happened.
+        <strong className="font-medium text-ink">This log is stored.</strong>{' '}
+        Every entry was written when the action happened — a confirmation, a
+        dismissal, a camera added — and is kept. Confirming records that a
+        person took responsibility for a detection. Detecto has not contacted
+        anyone. This page is a view of that record, not a reconstruction in the
+        browser. Filtering can hide a row, so do not treat a missing entry as
+        evidence that nothing happened.
       </p>
     </div>
   )
@@ -343,20 +334,6 @@ function Gaps() {
     <Panel label="Not built" className="mb-6">
       <PanelBody>
         <ul className="grid max-w-2xl gap-4">
-          <li>
-            <h3 className="text-meta font-medium text-ink">
-              No audit-event service, so nothing is kept
-            </h3>
-            <p className="mt-1 text-meta text-neutral-600">
-              Each feature in Detecto has its own API and none of them writes an
-              event. A real log is written on the server by the same transaction
-              that performs the action, to a store nobody can go back and edit.
-              It cannot be assembled from the client afterwards: this browser
-              only ever sees what it was told, so an action taken elsewhere would
-              leave no trace here at all.
-            </p>
-          </li>
-
           <li>
             <h3 className="text-meta font-medium text-ink">
               Alert decisions do not record what the person was allowed to do

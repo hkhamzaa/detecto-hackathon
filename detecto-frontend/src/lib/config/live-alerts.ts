@@ -20,3 +20,8 @@ export const LIVE_ALERTS_URL =
 
 /** The event that server emits one `Alert` on. */
 export const LIVE_ALERTS_EVENT = 'alert:new'
+
+/** Every classified window, including Normal — the live overlay, not the queue. */
+export const DETECTION_TICK_EVENT = 'detection:tick'
+export const DETECTION_TICK_HISTORY_EVENT = 'detection:history'
+export const WATCH_CAMERA_EVENT = 'watch_camera'

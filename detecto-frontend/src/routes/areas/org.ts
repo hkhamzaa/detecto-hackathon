@@ -2,6 +2,7 @@
 export { default as OrgOverview } from '@/pages/org/overview'
 export { default as OrgCameras } from '@/pages/org/cameras'
 export { default as OrgCamerasConnect } from '@/pages/org/cameras/connect'
+export { default as OrgCameraLive } from '@/pages/org/cameras/live'
 export { default as OrgModules } from '@/pages/org/modules'
 export { default as OrgAlerts } from '@/pages/org/alerts'
 export { default as OrgAlertDetail } from '@/pages/org/alerts/detail'

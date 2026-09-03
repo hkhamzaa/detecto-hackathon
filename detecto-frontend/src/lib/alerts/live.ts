@@ -53,8 +53,10 @@ export function useLiveAlerts() {
       }
 
       const queue = queryClient.getQueryData<Alert[]>(ALERTS_KEY)
-      // Ids restart at ALR-0001 every time the server restarts, so a repeat is
-      // a live possibility rather than a theoretical one.
+      // A repeat id is a live possibility, not a theoretical one: the initial
+      // GET /api/alerts fetch and this socket stream can both deliver the
+      // same freshly-persisted alert (a fetch in flight when it landed, a
+      // refetch after this event already queued it, ...).
       const alreadyQueued = queue?.some((existing) => existing.id === alert.id) ?? false
 
       // Only prepend to a queue that has actually loaded. Seeding a list into a

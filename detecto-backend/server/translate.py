@@ -25,6 +25,7 @@ One key is added that the frontend does not yet declare -- see PIPELINE_STATUS.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -62,20 +63,32 @@ INITIAL_STATUS = "unconfirmed"
 
 
 class AlertIdSequence:
-    """`ALR-0001`, `ALR-0002`, ... -- the format an operator can read aloud.
+    """`ALR-9F3A2B7C`, `ALR-04E1C6AA`, ... -- still the short, `ALR-`-prefixed,
+    human-quotable shape the frontend mock uses (`ALR-2291`), but the suffix
+    is 8 hex characters drawn from `uuid4` instead of a per-process counter.
 
-    Matches the frontend mock's `ALR-2291` shape. Per-process and not durable;
-    persistence is explicitly out of scope for this server.
+    A zero-padded counter restarting at `ALR-0001` on every process restart
+    (the previous scheme) is *guaranteed* to collide with whatever the table
+    already holds the moment there have been that many alerts, ever -- see
+    the Step 1 report on load testing this surfaced. `POST /api/alerts`
+    treats a same-id conflict as "already persisted" (409), which is correct
+    for an actual retry but silently drops a genuinely new alert when the id
+    collision is coincidental, and nothing before this made that
+    distinguishable. 32 bits of randomness per id instead makes a collision
+    astronomically unlikely rather than a certainty -- birthday-bound, tens
+    of thousands of alerts before even a 1% chance of one -- without
+    changing the `text` primary key, the API contract, or needing this
+    server to read Postgres before it can hand out its first id (which the
+    architecture doesn't allow anyway: the socket emission this id is
+    stamped on happens before the persist POST is even sent, let alone
+    answered -- see `Pipeline._handle`).
     """
 
-    def __init__(self, prefix: str = "ALR", start: int = 1) -> None:
+    def __init__(self, prefix: str = "ALR") -> None:
         self._prefix = prefix
-        self._next = start
 
     def take(self) -> str:
-        value = f"{self._prefix}-{self._next:04d}"
-        self._next += 1
-        return value
+        return f"{self._prefix}-{uuid.uuid4().hex[:8].upper()}"
 
 
 def is_alertable(event: dict[str, Any]) -> bool:

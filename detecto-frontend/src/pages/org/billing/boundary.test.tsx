@@ -145,7 +145,7 @@ describe('nothing beyond this organisation reaches the screen', () => {
     if (!result.ok) throw new Error(result.code)
 
     const cameras: Camera[] = [
-      { id: 'cam_1', name: 'Loading bay', zone: 'Yard', online: true, lastSeen: null },
+      { id: 'cam_1', name: 'Loading bay', zone: 'Yard', online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
     ]
 
     rendered = renderPage(<OrgBillingPage />, {

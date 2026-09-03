@@ -103,9 +103,9 @@ const DIRECTORY: Directory = {
 }
 
 const CAMERAS: Camera[] = [
-  { id: 'cam_1', name: 'Main entrance', zone: 'Front of house', online: true, lastSeen: null },
-  { id: 'cam_2', name: 'Loading bay', zone: 'Yard', online: true, lastSeen: null },
-  { id: 'cam_3', name: 'Gate', zone: 'Yard', online: true, lastSeen: null },
+  { id: 'cam_1', name: 'Main entrance', zone: 'Front of house', online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
+  { id: 'cam_2', name: 'Loading bay', zone: 'Yard', online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
+  { id: 'cam_3', name: 'Gate', zone: 'Yard', online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
 ]
 
 const DEFAULTS: NotificationSettings = {

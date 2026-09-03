@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { config } from '../config.js';
 import { pool } from '../db.js';
+import { verifyBoxCredential } from '../lib/box-credentials.js';
 import { verifyToken } from '../lib/tokens.js';
 
 /**
@@ -104,11 +105,20 @@ export function requirePermission(permission) {
 }
 
 /**
- * Gate for service-to-service calls — currently just detecto-backend/server
- * (the Python alert pipeline) creating alerts. Not a person's session: there
- * are no claims to attach, so a route behind this must never read `req.claims`
- * and must derive whatever org it's scoped to some other way (see the
- * create-alert route, which derives it from the camera being posted to).
+ * Gate for the one remaining shared-secret caller: detecto-backend/server,
+ * the dev-only Python alert pipeline, on `POST /api/alerts`. Not a person's
+ * session: there are no claims to attach, so a route behind this must never
+ * read `req.claims` and must derive whatever org it's scoped to some other
+ * way (see the create-alert route, which derives it from the camera being
+ * posted to).
+ *
+ * This USED to also gate the box-facing endpoints (`/:id/heartbeat`,
+ * `/:id/cameras`) — both now use `requireBoxCredential` below instead, a
+ * real per-box secret rather than one shared key any caller could present
+ * to act as any box. `requireInternalKey` stays for `/api/alerts` alone,
+ * deliberately: that endpoint's caller is this project's own dev-only test
+ * harness standing in for a box, not a box itself, and stays that way until
+ * a real box exists to replace it — see server/README.md.
  *
  * `timingSafeEqual` requires equal-length buffers; a length mismatch is
  * itself conclusive (the real key is a fixed, known length), so it's checked
@@ -124,5 +134,37 @@ export function requireInternalKey(req, res, next) {
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
+  next();
+}
+
+/**
+ * Gate for the box-facing endpoints — a real per-box credential (see
+ * lib/box-credentials.js), checked against the specific box named by the
+ * route's own `:id` param, not a fleet-wide shared secret. Attaches
+ * `req.box` (`{id, orgId}`) so the route handler never needs its own
+ * separate "does this box exist" query — this middleware already ran one.
+ *
+ * 404 for a box id that doesn't exist at all (boxes aren't secret the way
+ * an email address is — see the login-enumeration rule elsewhere in this
+ * file, which does NOT apply here); 401 for a real box with a missing,
+ * wrong, or revoked secret. Those are genuinely different failures, unlike
+ * requireInternalKey's single shared secret where there's nothing else to
+ * distinguish.
+ */
+export async function requireBoxCredential(req, res, next) {
+  const boxId = req.params.id;
+  const provided = req.headers['x-box-secret'];
+  if (typeof provided !== 'string' || !provided) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const { rows } = await pool.query('SELECT id, org_id FROM boxes WHERE id = $1', [boxId]);
+  const box = rows[0];
+  if (!box) return res.status(404).json({ error: 'not_found' });
+
+  const ok = await verifyBoxCredential(boxId, provided);
+  if (!ok) return res.status(401).json({ error: 'unauthorized' });
+
+  req.box = { id: box.id, orgId: box.org_id };
   next();
 }

@@ -1,12 +1,16 @@
-import { randomBytes } from 'node:crypto';
-
 import { Router } from 'express';
 
 import { config } from '../config.js';
 import { pool } from '../db.js';
 import { ALL_PERMISSION_KEYS } from '../lib/permissions.js';
 import { dummyHash, hashPassword, verifyPassword } from '../lib/passwords.js';
-import { checkLocked, clearFailures, recordFailure } from '../lib/rate-limiter.js';
+import {
+  checkLocked,
+  clearFailures,
+  createRateLimiter,
+  rateLimitMiddleware,
+  recordFailure,
+} from '../lib/rate-limiter.js';
 import {
   issueRefreshToken,
   revokeRefreshToken,
@@ -42,6 +46,27 @@ function clearRefreshCookie(res) {
     path: config.refreshCookie.path,
   });
 }
+
+/**
+ * Per-IP ceilings for the unauthenticated auth routes below — there's no
+ * account (or, for /refresh, no still-valid access token) to key a lockout
+ * to the way /login's `attempts` map does, so these key on `req.ip` instead.
+ * Generous enough not to trip on a real user retrying a typo or a page full
+ * of reloads; tight enough to blunt scripted signup spam, reset-email
+ * bombing, and refresh-token guessing.
+ */
+const signupLimiter = rateLimitMiddleware(
+  createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10 }),
+  (req) => req.ip,
+);
+const passwordResetLimiter = rateLimitMiddleware(
+  createRateLimiter({ windowMs: 15 * 60 * 1000, max: 5 }),
+  (req) => req.ip,
+);
+const refreshLimiter = rateLimitMiddleware(
+  createRateLimiter({ windowMs: 5 * 60 * 1000, max: 30 }),
+  (req) => req.ip,
+);
 
 /* -------------------------------------------------------------------------- */
 /* POST /api/auth/login                                                       */
@@ -178,7 +203,7 @@ async function resolvePlanId(client, accountType, requestedPlanId) {
   return rows[0]?.id ?? null;
 }
 
-authRouter.post('/signup', async (req, res) => {
+authRouter.post('/signup', signupLimiter, async (req, res) => {
   const body = req.body ?? {};
   const errors = signupErrors(body);
   if (Object.keys(errors).length > 0) {
@@ -324,7 +349,7 @@ const USER_BY_ID_SQL = `
  * takes effect on the very next refresh instead of surviving until the
  * access token's own expiry.
  */
-authRouter.post('/refresh', async (req, res) => {
+authRouter.post('/refresh', refreshLimiter, async (req, res) => {
   const presented = req.cookies?.[config.refreshCookie.name];
   if (!presented) return res.status(401).json({ error: 'unauthorized' });
 
@@ -381,7 +406,7 @@ authRouter.post('/refresh', async (req, res) => {
 /* caller anywhere in the frontend today.                                    */
 /* -------------------------------------------------------------------------- */
 
-authRouter.post('/password-reset', async (req, res) => {
+authRouter.post('/password-reset', passwordResetLimiter, async (req, res) => {
   const email = req.body?.email;
 
   // A malformed address is a problem with the input, not a claim about an
@@ -398,13 +423,16 @@ authRouter.post('/password-reset', async (req, res) => {
   // Stubbed: no email sender is wired up, and no persisted, single-use
   // reset token either — nothing in this pass consumes one (a
   // POST /api/auth/reset-password endpoint wasn't requested). A real send
-  // needs both before this does anything but log. Logged only when the
-  // account exists; the response below is identical either way.
+  // needs both before this does anything but log.
+  //
+  // The token itself is never logged — a token good for taking over the
+  // account has no business sitting in plaintext log storage — and neither
+  // is the email, which the identical response below already keeps off the
+  // enumeration boundary; leaking it into logs would reopen exactly what
+  // that response is designed to hide. Logged only when the account exists,
+  // as a bare event with no identifying detail.
   if (user) {
-    const token = randomBytes(32).toString('hex');
-    console.log(
-      `[password-reset] would email ${email.trim()}: ${config.frontendOrigin}/reset-password?token=${token}`,
-    );
+    console.log('[password-reset] reset requested for an existing account');
   }
 
   // Identical response whether or not the account exists — the frontend

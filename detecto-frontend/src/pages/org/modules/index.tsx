@@ -4,6 +4,7 @@ import { ChevronRight } from 'lucide-react'
 import { PageHeader } from '@/components/app-shell/page-header'
 import { CameraStatus } from '@/components/camera/camera-status'
 import { NoCamerasYet } from '@/components/camera/no-cameras-yet'
+import { ReviewStatusBadge } from '@/components/camera/review-status-badge'
 import { Button } from '@/components/ui/button'
 import { Panel, PanelBody } from '@/components/ui/panel'
 import { StatusWord } from '@/components/ui/status-word'
@@ -256,11 +257,14 @@ function CameraRow({
           )}
         />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-body font-medium text-ink">
-            {camera.name}
+          <span className="flex items-center gap-2">
+            <span className="truncate text-body font-medium text-ink">
+              {camera.name}
+            </span>
+            <ReviewStatusBadge camera={camera} />
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
-            <CameraStatus online={camera.online} className="text-meta" />
+            <CameraStatus camera={camera} className="text-meta" />
             <RunningSummary enabled={enabled} modules={modules} />
           </span>
         </span>

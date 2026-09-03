@@ -4,6 +4,7 @@ import { Plus } from 'lucide-react'
 import { PageHeader } from '@/components/app-shell/page-header'
 import { CameraStatus } from '@/components/camera/camera-status'
 import { CONNECT_PATH, NoCamerasYet } from '@/components/camera/no-cameras-yet'
+import { ReviewStatusBadge } from '@/components/camera/review-status-badge'
 import { Button } from '@/components/ui/button'
 import { Panel, PanelBody } from '@/components/ui/panel'
 import {
@@ -15,7 +16,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import type { Camera } from '@/lib/cameras/api'
-import { useCameras } from '@/lib/cameras/queries'
+import { useApproveCamera, useCameras } from '@/lib/cameras/queries'
 import { formatRelative, formatTimestamp } from '@/lib/time'
 
 export default function OrgCamerasPage() {
@@ -92,14 +93,22 @@ function Unavailable({
 }
 
 function CameraTable({ cameras }: { cameras: Camera[] }) {
-  const online = cameras.filter((camera) => camera.online).length
+  // "N of total online" against a total that includes never-configured
+  // cameras would read as more broken than it is — see the Step 1 report.
+  // Configured is the honest denominator for an online/offline ratio.
+  const configured = cameras.filter((camera) => camera.sourceType !== 'unconfigured')
+  const online = configured.filter((camera) => camera.online).length
+  const pending = cameras.filter((camera) => camera.reviewStatus === 'pending').length
 
   return (
     <Panel
       label="Connected cameras"
       action={
         <span className="label-micro text-neutral-500">
-          {online} of {cameras.length} online
+          {configured.length === 0
+            ? 'None configured yet'
+            : `${online} of ${configured.length} configured online`}
+          {pending > 0 && ` · ${pending} pending review`}
         </span>
       }
     >
@@ -111,16 +120,20 @@ function CameraTable({ cameras }: { cameras: Camera[] }) {
               <TableHead>Zone</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Last picture</TableHead>
+              <TableHead className="text-right">
+                <span className="sr-only">Review</span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {cameras.map((camera) => (
               <TableRow key={camera.id}>
                 <TableCell>
-                  <span className="block text-meta font-medium text-ink">
-                    {camera.name}
+                  <span className="flex items-center gap-2">
+                    <span className="text-meta font-medium text-ink">{camera.name}</span>
+                    <ReviewStatusBadge camera={camera} />
                   </span>
-                  <span className="font-mono text-micro uppercase tracking-[0.14em] text-neutral-500">
+                  <span className="block font-mono text-micro uppercase tracking-[0.14em] text-neutral-500">
                     {camera.id}
                   </span>
                 </TableCell>
@@ -128,7 +141,7 @@ function CameraTable({ cameras }: { cameras: Camera[] }) {
                   {camera.zone || <span className="text-neutral-400">Not set</span>}
                 </TableCell>
                 <TableCell>
-                  <CameraStatus online={camera.online} className="text-meta" />
+                  <CameraStatus camera={camera} className="text-meta" />
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-right font-mono text-data text-neutral-600">
                   {camera.lastSeen ? (
@@ -139,11 +152,41 @@ function CameraTable({ cameras }: { cameras: Camera[] }) {
                     'Never'
                   )}
                 </TableCell>
+                <TableCell className="text-right">
+                  {camera.reviewStatus === 'pending' && <ApproveButton camera={camera} />}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
       </PanelBody>
     </Panel>
+  )
+}
+
+/**
+ * The one control that moves a box-reported camera into use. Not
+ * optimistic (see useApproveCamera) — shows its own pending/error state
+ * rather than assuming the row will just update.
+ */
+function ApproveButton({ camera }: { camera: Camera }) {
+  const approve = useApproveCamera()
+
+  return (
+    <div className="inline-flex flex-col items-end gap-1">
+      <Button
+        variant="confirm"
+        size="sm"
+        onClick={() => approve.mutate(camera.id)}
+        disabled={approve.isPending}
+      >
+        {approve.isPending ? 'Approving…' : 'Approve'}
+      </Button>
+      {approve.isError && (
+        <span role="alert" className="text-micro text-signal-700 dark:text-signal-300">
+          Couldn't approve. Try again.
+        </span>
+      )}
+    </div>
   )
 }

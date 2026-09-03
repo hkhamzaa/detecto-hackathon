@@ -38,6 +38,8 @@ function camera(over: Partial<Camera> = {}): Camera {
     zone: 'Yard',
     online: true,
     lastSeen: null,
+    reviewStatus: 'approved',
+    sourceType: 'file',
     ...over,
   }
 }

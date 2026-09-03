@@ -22,7 +22,7 @@ const ORG_ADMIN: Claims = {
 }
 
 function camera(id: string, name: string, zone: string): Camera {
-  return { id, name, zone, online: true, lastSeen: null }
+  return { id, name, zone, online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' }
 }
 
 const CAMERAS: Camera[] = [

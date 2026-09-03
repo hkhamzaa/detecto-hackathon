@@ -73,12 +73,17 @@ alertsRouter.get('/', requireAuth, requireOrgScope, requireActiveOrg, requirePer
  * client-supplied org_id" rule every other route in this file holds, just
  * enforced one level removed since there's no JWT to read it from here.
  *
- * `id` is supplied by the caller (the pipeline's own `ALR-0001`-style
- * sequence, not durable across its restarts) rather than generated here, so
- * the id on the socket emission and the id in Postgres are the same string
- * — confirming/dismissing from a UI that only has the socket payload has to
- * resolve to this exact row. A restart colliding with a previous run's ids
- * is possible and handled as a conflict, not a crash — see the 409 below.
+ * `id` is supplied by the caller (the pipeline's own `ALR-<8 hex chars>`
+ * generator — 32 random bits per id, see server/translate.py's
+ * `AlertIdSequence`) rather than generated here, so the id on the socket
+ * emission and the id in Postgres are the same string — confirming/
+ * dismissing from a UI that only has the socket payload has to resolve to
+ * this exact row. A same-id conflict is astronomically unlikely now (it
+ * used to be guaranteed on every restart, back when this was a zero-padded
+ * per-process counter — see the Step 1 report on load testing that found
+ * it); still handled as a 409 rather than a crash below, but the caller
+ * (server/app.py's `Pipeline._persist`) now treats that 409 as the genuine
+ * anomaly it is — a persist failure to count and log, not silent success.
  */
 alertsRouter.post('/', requireInternalKey, async (req, res) => {
   const body = req.body ?? {};
@@ -123,10 +128,14 @@ alertsRouter.post('/', requireInternalKey, async (req, res) => {
     );
     res.status(201).json(toWireAlert(rows[0]));
   } catch (err) {
-    // alerts_pkey — the id the pipeline generated this run collided with one
-    // already stored (its own sequence resets to ALR-0001 on every restart).
-    // A conflict, not a server error: the caller should treat this as "this
-    // alert is already persisted" rather than retrying or crashing.
+    // alerts_pkey — the id the pipeline generated collided with one already
+    // stored. With ids now 32 random bits (see the docstring above), this
+    // should be vanishingly rare rather than the routine restart artifact it
+    // used to be. A conflict, not a server error, so still a 409 rather than
+    // a 500 — but the caller must NOT treat this as "already persisted and
+    // therefore fine": it genuinely does not know whether the existing row
+    // is this same detection or an unrelated collision, so it counts this as
+    // a persist failure. See server/app.py's `Pipeline._persist`.
     if (err.code === '23505') return res.status(409).json({ error: 'duplicate_id' });
     throw err;
   }

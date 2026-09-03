@@ -8,7 +8,7 @@
 //      needs modules to point at.
 //   2. One test organization, one test user (its default Admin role,
 //      holding every permission — matching the seed lib/roles/api.ts
-//      builds for a brand new org), and two test cameras.
+//      builds for a brand new org), and three test cameras.
 //
 // Safe to re-run: every insert is keyed and upserts on conflict.
 import 'dotenv/config';
@@ -118,21 +118,30 @@ async function seedTestOrg(client) {
     [orgId, roleId, TEST_USER_EMAIL, passwordHash],
   );
 
+  // `online: false`/no address for all three: nothing here is a real network
+  // device, and a seed row claiming otherwise is exactly the honesty gap the
+  // schema itself no longer papers over (see the Step 1 report — `online`
+  // must come from a genuine live signal, not a seed script's say-so).
+  // "Demo camera 1" is `source_type: 'file'` because detecto-backend/server
+  // really is wired to feed it (its default DETECTO_CAMERA_NAME/
+  // DETECTO_ZONE match this row exactly, and alerts.camera_id is a uuid FK
+  // to it — see server/README.md); it still starts `online: false` because
+  // nothing has sent a frame yet at seed time. "Main entrance"/"Loading bay"
+  // are `unconfigured` — genuinely nothing connects to them.
   const cameras = [
-    { name: 'Main entrance', zone: 'Front of house' },
-    { name: 'Loading bay', zone: 'Yard' },
-    // Matches detecto-backend/server's default DETECTO_CAMERA_NAME/
-    // DETECTO_ZONE exactly. The pipeline needs a real camera row to attach
-    // alerts to (alerts.camera_id is a uuid FK, not the pipeline's own
-    // "demo-camera-1" string) — see server/README.md.
-    { name: 'Demo camera 1', zone: 'Demo feed' },
+    { name: 'Main entrance', zone: 'Front of house', sourceType: 'unconfigured', sourceUri: null },
+    { name: 'Loading bay', zone: 'Yard', sourceType: 'unconfigured', sourceUri: null },
+    {
+      name: 'Demo camera 1', zone: 'Demo feed', sourceType: 'file',
+      sourceUri: 'Detecto_Demo_Package/sample_outputs/test_video.mp4',
+    },
   ];
   for (const camera of cameras) {
     await client.query(
-      `INSERT INTO cameras (org_id, name, zone, online, address)
-       SELECT $1, $2, $3, true, '192.168.1.50'
+      `INSERT INTO cameras (org_id, name, zone, online, address, source_type, source_uri)
+       SELECT $1, $2, $3, false, NULL, $4, $5
        WHERE NOT EXISTS (SELECT 1 FROM cameras WHERE org_id = $1 AND name = $2)`,
-      [orgId, camera.name, camera.zone],
+      [orgId, camera.name, camera.zone, camera.sourceType, camera.sourceUri],
     );
   }
 
@@ -141,9 +150,38 @@ async function seedTestOrg(client) {
     [orgId],
   );
 
+  // One seeded box, paired to "Demo camera 1" via `box_id` — a real link,
+  // not fabricated data: nothing else in this codebase ever sets `box_id`
+  // (no discovery flow exists, and POST /api/boxes/pair creates a box but
+  // never attaches one to a camera — see the Step 1 report), so without
+  // this there would be no reproducible way to exercise or demo
+  // `POST /api/boxes/:id/heartbeat` and the camera-liveness derivation it
+  // feeds (cameras.js's `CAMERA_SELECT`) without hand-editing rows after
+  // every reseed. `last_seen_at` starts NULL, same honesty rule as
+  // `online: false` above — a seed script saying a box is live is exactly
+  // the fake liveness this schema exists to rule out; it only becomes true
+  // once something actually calls the heartbeat endpoint (see
+  // server/scripts/simulate_heartbeat.py).
+  const box = await client.query(
+    `INSERT INTO boxes (org_id, label, channels)
+     SELECT $1, 'Detecto Box - Demo feed', 1
+     WHERE NOT EXISTS (SELECT 1 FROM boxes WHERE org_id = $1 AND label = 'Detecto Box - Demo feed')
+     RETURNING id`,
+    [orgId],
+  );
+  const boxRow = box.rows[0]
+    ?? (await client.query(
+      `SELECT id FROM boxes WHERE org_id = $1 AND label = 'Detecto Box - Demo feed'`,
+      [orgId],
+    )).rows[0];
+  await client.query(`UPDATE cameras SET box_id = $1 WHERE id = $2`, [
+    boxRow.id,
+    demoCamera.rows[0].id,
+  ]);
+
   await seedSubscription(client, orgId);
 
-  return { demoCameraId: demoCamera.rows[0].id };
+  return { demoCameraId: demoCamera.rows[0].id, demoBoxId: boxRow.id };
 }
 
 /**
@@ -190,10 +228,11 @@ async function main() {
   try {
     await client.query('BEGIN');
     await seedCatalogue(client);
-    const { demoCameraId } = await seedTestOrg(client);
+    const { demoCameraId, demoBoxId } = await seedTestOrg(client);
     await client.query('COMMIT');
     console.log('Seed complete.');
     console.log(`Demo camera id (for DETECTO_CAMERA_ID): ${demoCameraId}`);
+    console.log(`Demo box id (for simulate_heartbeat.py --box-id): ${demoBoxId}`);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

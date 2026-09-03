@@ -4,7 +4,7 @@ import { Check } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 const NEXT = [
-  'Detecto is receiving these feeds now. Cameras the box already had a picture from show as online straight away; anything you typed in by hand stays offline until the box can reach it.',
+  'They start out not configured — nothing is wired up to send them a picture yet. Your camera list shows the honest state of each one as that changes, rather than assuming it worked.',
   'Detection is switched on separately, camera by camera, under Detection modules. Until you do that, nothing is being watched for weapons or violence.',
   'Once it is on, every flag still waits for a person to confirm it. Detecto does not contact anyone on its own.',
 ]

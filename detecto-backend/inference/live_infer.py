@@ -244,15 +244,133 @@ def detect_weapon(model, frame: np.ndarray, conf: float) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# Streaming
+# Video sources
+#
+# The extension point this refactor exists for: everything below `run()`'s
+# frame loop already only ever touched raw BGR frames + an fps number, never
+# `cv2.VideoCapture` itself, so pulling that out behind an interface changes
+# nothing about the pacing/windowing/inference logic -- it only names the
+# seam so a real capture source can be dropped in later without touching any
+# of that logic again.
 # --------------------------------------------------------------------------
 
-def iter_frames(capture: cv2.VideoCapture) -> Iterator[np.ndarray]:
-    while True:
-        ok, frame = capture.read()
-        if not ok:
-            return
-        yield frame
+class VideoSource:
+    """A sequential source of BGR frames, plus the fps to pace them by.
+
+    Three methods, deliberately the whole contract: `open()` to acquire
+    whatever resource backs it, `frames()` to iterate it once, `fps` to
+    report a pacing rate (0 if unknown -- callers apply their own
+    fallback, same as the fixed behavior before this existed), `close()` to
+    release it. Nothing about `run()`'s loop depends on there being a file,
+    or on which subclass is in play.
+    """
+
+    def open(self) -> None:
+        raise NotImplementedError
+
+    def frames(self) -> Iterator[np.ndarray]:
+        raise NotImplementedError
+
+    @property
+    def fps(self) -> float:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class FileVideoSource(VideoSource):
+    """Reads a video file sequentially via OpenCV.
+
+    Today's only real, working source -- this is exactly what `run()` did
+    inline before this refactor, moved behind the interface above without
+    any change in behavior.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._capture: cv2.VideoCapture | None = None
+
+    def open(self) -> None:
+        capture = cv2.VideoCapture(str(self._path))
+        if not capture.isOpened():
+            raise RuntimeError(f"could not open video: {self._path}")
+        self._capture = capture
+
+    @property
+    def fps(self) -> float:
+        assert self._capture is not None, "open() not called"
+        return self._capture.get(cv2.CAP_PROP_FPS) or 0.0
+
+    def frames(self) -> Iterator[np.ndarray]:
+        assert self._capture is not None, "open() not called"
+        while True:
+            ok, frame = self._capture.read()
+            if not ok:
+                return
+            yield frame
+
+    def close(self) -> None:
+        if self._capture is not None:
+            self._capture.release()
+            self._capture = None
+
+
+class RTSPVideoSource(VideoSource):
+    """NOT IMPLEMENTED -- a structural stub, not a working source.
+
+    This exists so `cameras.source_type = 'rtsp'` has somewhere real to
+    route to in the code, matching the value the schema can already hold
+    (see detecto-backend/db's camera-source migration) -- selecting a
+    source is meant to become a config change, not a code change, once real
+    hardware exists. It is deliberately NOT a working implementation:
+    connecting to and pacing a real RTSP stream (reconnect-on-drop, no
+    fixed frame count the way a file has, backpressure when inference falls
+    behind a live feed) needs real hardware to build and test against,
+    which this project does not have. Faking it "working" here (e.g.
+    quietly falling back to a file, or returning empty frames) would be
+    exactly the dishonesty this whole task exists to avoid -- so every
+    method fails loudly instead.
+    """
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+
+    def _not_implemented(self) -> NotImplementedError:
+        return NotImplementedError(
+            f"RTSPVideoSource is not implemented (url={self._url!r}). "
+            "This is a structural stub for real-hardware integration -- "
+            "see its own docstring in inference/live_infer.py."
+        )
+
+    def open(self) -> None:
+        raise self._not_implemented()
+
+    @property
+    def fps(self) -> float:
+        raise self._not_implemented()
+
+    def frames(self) -> Iterator[np.ndarray]:
+        raise self._not_implemented()
+        yield  # pragma: no cover -- makes this a generator function; never reached.
+
+    def close(self) -> None:
+        pass
+
+
+def build_video_source(*, source_type: str, video: Path | None, rtsp_url: str | None) -> VideoSource:
+    """Config/CLI-driven selection -- the one place a source type turns into
+    a class. Adding a third source type later means adding one branch here
+    and one subclass above, nothing else in this file."""
+    if source_type == "file":
+        if video is None:
+            raise ValueError("source_type='file' requires --video")
+        return FileVideoSource(video)
+    if source_type == "rtsp":
+        if not rtsp_url:
+            raise ValueError("source_type='rtsp' requires --rtsp-url")
+        return RTSPVideoSource(rtsp_url)
+    raise ValueError(f"unknown source_type: {source_type!r}")
 
 
 def build_event(
@@ -305,15 +423,19 @@ def run(args: argparse.Namespace) -> int:
         weapon_model = load_weapon_model(args.weapon_model, device)
         log(f"[init] weapon detector loaded: {args.weapon_model.name} (informational only)")
 
-    capture = cv2.VideoCapture(str(args.video))
-    if not capture.isOpened():
-        log(f"[error] could not open video: {args.video}")
+    source = build_video_source(
+        source_type=args.source_type, video=args.video, rtsp_url=args.rtsp_url
+    )
+    try:
+        source.open()
+    except (RuntimeError, NotImplementedError, ValueError) as exc:
+        log(f"[error] {exc}")
         return 1
 
-    fps = capture.get(cv2.CAP_PROP_FPS) or 0.0
+    fps = source.fps or 0.0
     if fps <= 0:
         fps = args.fallback_fps
-        log(f"[warn] video reports no FPS; assuming {fps}")
+        log(f"[warn] source reports no FPS; assuming {fps}")
 
     window_frames = max(NUM_SAMPLED_FRAMES, int(round(args.window_seconds * fps)))
     stride_frames = max(1, int(round(args.stride_seconds * fps)))
@@ -330,7 +452,7 @@ def run(args: argparse.Namespace) -> int:
     stream_start = time.perf_counter()
 
     try:
-        for index, frame in enumerate(iter_frames(capture)):
+        for index, frame in enumerate(source.frames()):
             # Pace to wall clock so timing behaviour matches a real feed.
             if not args.no_realtime:
                 target = index / fps
@@ -415,7 +537,7 @@ def run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         log("[done] interrupted")
     finally:
-        capture.release()
+        source.close()
 
     log(f"[done] emitted {emitted} event(s)")
     return 0
@@ -434,9 +556,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
+        "--source-type", default="file", choices=("file", "rtsp"),
+        help=(
+            "Where frames come from. 'file' is the only implemented source "
+            "today; 'rtsp' is a structural stub -- see RTSPVideoSource -- "
+            "and will fail loudly if selected."
+        ),
+    )
+    parser.add_argument(
         "--video", type=Path,
         default=package / "sample_outputs" / "demo_weaponized_clip.mp4",
-        help="Input video file.",
+        help="Input video file. Used when --source-type=file.",
+    )
+    parser.add_argument(
+        "--rtsp-url", default=None,
+        help="RTSP stream URL. Used when --source-type=rtsp (not yet implemented).",
     )
     parser.add_argument(
         "--violence-model", type=Path,
@@ -491,7 +625,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    for path in (args.video, args.violence_model):
+    if args.source_type == "rtsp" and not args.rtsp_url:
+        print("[error] --source-type rtsp requires --rtsp-url", file=sys.stderr)
+        return 1
+    # Only the file source has a path to check ahead of time -- rtsp's
+    # "does this even exist" question is answered by build_video_source()
+    # raising, not by a file-exists check that has nothing to check.
+    paths = (args.video, args.violence_model) if args.source_type == "file" else (args.violence_model,)
+    for path in paths:
         if not path.exists():
             print(f"[error] missing file: {path}", file=sys.stderr)
             return 1

@@ -35,6 +35,8 @@ function cameras(n: number): Camera[] {
     zone: 'Yard',
     online: true,
     lastSeen: null,
+    reviewStatus: 'approved',
+    sourceType: 'file',
   }))
 }
 

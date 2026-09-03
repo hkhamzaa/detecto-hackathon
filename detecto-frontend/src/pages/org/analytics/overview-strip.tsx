@@ -44,7 +44,13 @@ export function OverviewStrip({
   const volume = weekOnWeek(alerts, now)
   const median = medianDecisionMinutes(alerts)
 
-  const offline = cameras?.filter((camera) => !camera.online).length ?? null
+  // A never-configured camera isn't "offline" — it was never sending
+  // anything to be offline from. Counting it as one would inflate this
+  // figure (and its Signal tone) with cameras nobody has finished setting
+  // up, not cameras something actually went wrong with. See the Step 1
+  // report on camera status honesty.
+  const configured = cameras?.filter((camera) => camera.sourceType !== 'unconfigured') ?? null
+  const offline = configured?.filter((camera) => !camera.online).length ?? null
 
   return (
     <Panel
@@ -78,9 +84,11 @@ export function OverviewStrip({
           note={
             offline === null
               ? "Couldn't reach the camera list"
-              : offline === 0
-                ? `All ${cameras?.length ?? 0} sending a picture`
-                : `Of ${cameras?.length ?? 0} connected — not watching anything`
+              : configured?.length === 0
+                ? 'No cameras configured yet'
+                : offline === 0
+                  ? `All ${configured?.length ?? 0} sending a picture`
+                  : `Of ${configured?.length ?? 0} configured — not watching anything`
           }
         />
       </div>

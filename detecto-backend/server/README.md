@@ -55,6 +55,16 @@ service is ever deployed somewhere the other end of that connection isn't
 trusted by default, this needs to become something stronger before that
 happens.
 
+**This key is deliberately scoped to `POST /api/alerts` only, and only
+because the caller here is this project's own dev-only Python test harness
+standing in for a box — not a real box.** It is NOT how `POST
+/api/boxes/:id/heartbeat` or `POST /api/boxes/:id/cameras` authenticate.
+Those use a real per-box credential instead (`X-Box-Secret`, issued by
+`POST /api/boxes/pair` and stored hashed — see `api/src/lib/
+box-credentials.js`), specific to one box, revocable independently of every
+other box's. `server/scripts/simulate_heartbeat.py` exercises that real
+mechanism, not this shared key — see its own docstring.
+
 **`DETECTO_CAMERA_ID` must be a real camera's id, not a made-up string.**
 `alerts.camera_id` in the schema is a `uuid` foreign key to an actual row in
 `cameras` — the API looks the camera up to find out which organization the
@@ -176,7 +186,7 @@ Event name: **`alert:new`**. Payload is one `Alert`, matching the type in
 
 ```json
 {
-  "id": "ALR-0001",
+  "id": "ALR-9F3A2B7C",
   "cameraId": "13d32327-a694-4ef8-8c00-3ebc951fce68",
   "cameraName": "Demo camera 1",
   "zone": "Demo feed",
@@ -197,7 +207,7 @@ Event name: **`alert:new`**. Payload is one `Alert`, matching the type in
 
 | Phase 1 | `Alert` | |
 | --- | --- | --- |
-| — | `id` | `ALR-0001`, `ALR-0002`, … Generated per-process (resets on restart), but now persisted through the API — see "Persistence" above for what a restart's colliding ids mean |
+| — | `id` | `ALR-` + 8 random hex characters (32 bits), generated fresh per alert — collision-safe across restarts, unlike the zero-padded per-process counter this replaced (see the Step 1 report on load testing that found it silently dropped alerts) |
 | `camera_id` | `cameraId` | Straight through — must be a real camera's uuid; see `DETECTO_CAMERA_ID` above |
 | — | `cameraName`, `zone` | From config. Phase 1 knows an id, not a place |
 | `classification` | `kind` | `Violence` → `violence`, `Weaponized` → `weapon` |

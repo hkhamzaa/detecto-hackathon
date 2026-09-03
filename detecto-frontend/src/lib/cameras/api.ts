@@ -64,6 +64,26 @@ export type Camera = {
   online: boolean
   /** ISO timestamp of the last picture received, or null if there never was one. */
   lastSeen: string | null
+  /**
+   * `'pending'` when a box reported this camera and nobody has looked at it
+   * yet — it exists, and may already be sending a picture, but isn't in use
+   * (the backend refuses to enable a detection module on it) until a person
+   * moves it to `'approved'`. Every camera added by hand through this page's
+   * own flow is `'approved'` immediately — a human already reviewed it by
+   * the act of adding it.
+   */
+  reviewStatus: 'pending' | 'approved'
+  /**
+   * `'unconfigured'` — a row exists but nothing is actually wired up to
+   * send it a picture. Every camera this page's own add flow creates starts
+   * here; only a box auto-reporting itself (`'rtsp'`) or this project's own
+   * dev/test harness (`'file'`) ever moves past it. Distinct from `online`
+   * on purpose: `online: false` alone can't say whether a camera was ever
+   * connected at all or just isn't sending anything right now, and treating
+   * those as the same fact is exactly the honesty gap this field closes —
+   * see components/camera/camera-status.tsx.
+   */
+  sourceType: 'unconfigured' | 'file' | 'rtsp'
 }
 
 export type NewCamera = {
@@ -83,6 +103,11 @@ export type ListResult =
   | { ok: true; cameras: Camera[] }
   | { ok: false; code: 'unavailable' }
 
+export type ApproveResult =
+  | { ok: true; camera: Camera }
+  | { ok: false; code: 'forbidden' }
+  | { ok: false; code: 'unavailable' }
+
 /* -------------------------------------------------------------------------- */
 /* Public surface                                                             */
 /* -------------------------------------------------------------------------- */
@@ -97,6 +122,14 @@ export function discoverCameras(boxId: string): Promise<DiscoveryResult> {
 
 export function addCameras(cameras: NewCamera[]): Promise<AddResult> {
   return USE_MOCKS ? mockAdd(cameras) : realAdd(cameras)
+}
+
+/** Moves a box-reported camera from `'pending'` to `'approved'` — the one
+ * thing a person does to put it into use. There is no reverse of this: a
+ * camera already approved cannot be sent back to `'pending'` through this
+ * or any other endpoint. */
+export function approveCamera(id: string): Promise<ApproveResult> {
+  return USE_MOCKS ? mockApprove(id) : realApprove(id)
 }
 
 export function listCameras(): Promise<ListResult> {
@@ -160,6 +193,14 @@ function toCamera(value: unknown): Camera | null {
     zone: str(c.zone) ?? '',
     online: c.online === true,
     lastSeen: str(c.lastSeen),
+    // 'pending' only when the server actually says so; any other value
+    // (including one this build doesn't recognise yet) reads as the
+    // long-standing default every camera had before this field existed.
+    reviewStatus: c.reviewStatus === 'pending' ? 'pending' : 'approved',
+    // Same defensive rule as reviewStatus above: anything other than the
+    // two real configured values reads as 'unconfigured' rather than
+    // silently claiming a source that isn't actually there.
+    sourceType: c.sourceType === 'file' || c.sourceType === 'rtsp' ? c.sourceType : 'unconfigured',
   }
 }
 
@@ -249,6 +290,26 @@ async function realList(): Promise<ListResult> {
   const payload = await readObject(response)
   if (!payload) return { ok: false, code: 'unavailable' }
   return { ok: true, cameras: collect(payload.cameras, toCamera) }
+}
+
+async function realApprove(id: string): Promise<ApproveResult> {
+  let response: Response
+  try {
+    response = await fetch(`/api/cameras/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ reviewStatus: 'approved' }),
+    })
+  } catch {
+    return { ok: false, code: 'unavailable' }
+  }
+
+  if (response.status === 403) return { ok: false, code: 'forbidden' }
+  if (!response.ok) return { ok: false, code: 'unavailable' }
+
+  const camera = toCamera(await readObject(response))
+  if (!camera) return { ok: false, code: 'unavailable' }
+  return { ok: true, camera }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -346,10 +407,21 @@ async function mockAdd(cameras: NewCamera[]): Promise<AddResult> {
       id: `cam_${String(mockCounter).padStart(3, '0')}`,
       name: camera.name,
       zone: camera.zone,
-      // A camera the box already got a picture from is online the moment it is
-      // added. One typed in by hand has never been reached, so it is not.
-      online: camera.discoveredId !== null,
-      lastSeen: camera.discoveredId !== null ? new Date().toISOString() : null,
+      // Matches the real POST /api/cameras exactly: online is NOT decided by
+      // whether the box discovered this camera or a person typed it in —
+      // every camera this flow creates starts unconfigured and offline,
+      // full stop. It only becomes real once something wires an actual
+      // source to it, which this human add-flow doesn't do (see
+      // cameras.js's own note on this — a known, honestly-stated gap, not
+      // hidden behind a discoveredId-based "online" guess).
+      online: false,
+      lastSeen: null,
+      // A human just walked through this exact flow to add it — already
+      // reviewed, same as every camera this mock has ever produced. Only
+      // POST /api/boxes/:id/cameras (a real box reporting on its own,
+      // outside this UI entirely) ever creates a 'pending' one.
+      reviewStatus: 'approved',
+      sourceType: 'unconfigured',
     }
   })
 
@@ -360,6 +432,16 @@ async function mockAdd(cameras: NewCamera[]): Promise<AddResult> {
 async function mockList(): Promise<ListResult> {
   await wait(MOCK_DELAY.list)
   return { ok: true, cameras: mockCameras }
+}
+
+async function mockApprove(id: string): Promise<ApproveResult> {
+  await wait(MOCK_DELAY.add)
+
+  const camera = mockCameras.find((c) => c.id === id)
+  if (!camera) return { ok: false, code: 'unavailable' }
+
+  camera.reviewStatus = 'approved'
+  return { ok: true, camera }
 }
 
 /**

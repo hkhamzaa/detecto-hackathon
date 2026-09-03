@@ -30,9 +30,9 @@ const MODULES: DetectionModule[] = [
 ]
 
 const CAMERAS: Camera[] = [
-  { id: 'c1', name: 'Main entrance', zone: 'Front of house', online: true, lastSeen: null },
-  { id: 'c2', name: 'Loading bay', zone: 'Yard', online: false, lastSeen: null },
-  { id: 'c3', name: 'Car park', zone: 'Perimeter', online: true, lastSeen: null },
+  { id: 'c1', name: 'Main entrance', zone: 'Front of house', online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
+  { id: 'c2', name: 'Loading bay', zone: 'Yard', online: false, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
+  { id: 'c3', name: 'Car park', zone: 'Perimeter', online: true, lastSeen: null, reviewStatus: 'approved', sourceType: 'file' },
 ]
 
 /** Spread across eight weeks and around the clock, with a slow tail in it. */
@@ -75,7 +75,7 @@ describe('overview strip', () => {
     const out = text(<OverviewStrip alerts={FULL} cameras={CAMERAS} now={NOW} />)
     expect(out).toContain('Alerts raised')
     expect(out).toContain('Median time to a decision')
-    expect(out).toContain('Of 3 connected')
+    expect(out).toContain('Of 3 configured')
   })
 
   it('colours the offline count, because that figure is itself the problem', () => {

@@ -16,16 +16,16 @@ export type DemoPersona = {
 
 export const DEMO_PERSONAS: DemoPersona[] = [
   {
-    id: 'super',
-    label: 'Platform admin',
-    blurb: 'Detecto staff. Tenants, billing, module flags.',
-    email: 'super@northgate.example',
-  },
-  {
     id: 'admin',
     label: 'Org admin',
     blurb: 'Northgate. Cameras, people, alerts, billing.',
     email: 'admin@northgate.example',
+  },
+  {
+    id: 'super',
+    label: 'Platform admin',
+    blurb: 'Detecto staff. Tenants, billing, module flags.',
+    email: 'super@northgate.example',
   },
   {
     id: 'member',

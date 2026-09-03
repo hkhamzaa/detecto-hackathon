@@ -217,7 +217,11 @@ export function CredentialsStep({
         {pending === 'form' ? 'Signing in…' : 'Sign in'}
       </Button>
 
-      <div className="mt-10 border-t border-neutral-200 pt-6">
+      <p className="mt-4 text-center text-body font-medium text-signal-600">
+        Scroll below to sign in directly — no email or password needed.
+      </p>
+
+      <div className="mt-8 border-t border-neutral-200 pt-6">
         <p className="text-meta font-medium text-ink">Demo roles</p>
         <p className="mt-1 text-meta text-neutral-600">
           Hackathon shortcut. One click signs you in as that person.
@@ -230,6 +234,7 @@ export function CredentialsStep({
             >
               <div className="min-w-0 flex-1">
                 <p className="text-meta font-medium text-ink">{persona.label}</p>
+                <p className="font-mono text-meta text-neutral-700">{persona.email}</p>
                 <p className="text-meta text-neutral-600">{persona.blurb}</p>
               </div>
               <Button

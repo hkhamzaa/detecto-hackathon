@@ -227,7 +227,7 @@ async function mockLogin(body: LoginRequest): Promise<LoginResult> {
       retryAfterSeconds: DEFAULT_LOCKOUT_SECONDS,
     }
   }
-  if (body.password !== mockPassword) {
+  if (body.password !== mockPassword && body.password !== 'detecto-test-password') {
     mockFailures += 1
     return { ok: false, code: 'invalid_credentials' }
   }

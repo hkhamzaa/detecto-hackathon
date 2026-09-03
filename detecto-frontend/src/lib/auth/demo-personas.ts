@@ -1,5 +1,3 @@
-import { USE_MOCKS } from '@/lib/config/mocks'
-
 /**
  * Hackathon demo accounts. The sign-in page offers a button per role so
  * judges can open each surface without typing a password.
@@ -50,5 +48,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
 ]
 
 export function demoPassword() {
-  return USE_MOCKS ? 'detecto-demo' : 'detecto-test-password'
+  // Same password the real API seed uses. Mock login also accepts this so
+  // the one-click buttons work whether VITE_USE_MOCKS is on or off.
+  return 'detecto-test-password'
 }
